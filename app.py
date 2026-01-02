@@ -4,17 +4,16 @@ import pandas as pd
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 
-# 1. CONFIGURACIÓN DE PÁGINA (Siempre debe ir primero)
+# 1. CONFIGURACIÓN (Siempre primero)
 st.set_page_config(page_title="IPTV Tool Pro", page_icon="📺", layout="wide")
 st.title("📺 IPTV Tool Web")
-st.markdown("Verificador y Descargador con **Buscador Inteligente**.")
+st.markdown("Verificador, Descargador y **Creador de Listas M3U**.")
 
 # --- FUNCIONES ---
 
 def limpiar_url(url_raw):
     url = url_raw.strip()
     if not url or not url.startswith("http"): return None
-    # Forzamos uso de API
     return url.replace("/get.php", "/player_api.php").replace("/xmltv.php", "/player_api.php")
 
 def extraer_credenciales(url_api):
@@ -84,15 +83,39 @@ def obtener_episodios(host, user, passw, series_id):
         return pd.DataFrame(lista_episodios)
     except: return None
 
-# --- INTERFAZ PRINCIPAL ---
+# Función NUEVA para canales en vivo
+def obtener_canales_live(host, user, passw):
+    url = f"{host}/player_api.php?username={user}&password={passw}&action=get_live_streams"
+    try:
+        r = requests.get(url, timeout=35)
+        return r.json() # Devolvemos la lista cruda para procesarla
+    except: return None
 
-# ESTA ES LA LÍNEA QUE FALTABA Y DABA ERROR:
-tab1, tab2, tab3 = st.tabs(["🔍 Una Cuenta", "📋 Lista Masiva", "📥 BUSCADOR (Pelis/Series)"])
+def generar_m3u(canales_seleccionados, host, user, passw):
+    # Cabecera M3U
+    contenido = "#EXTM3U\n"
+    for canal in canales_seleccionados:
+        nombre = canal.get('name', 'Sin Nombre')
+        logo = canal.get('stream_icon', '')
+        epg_id = canal.get('epg_channel_id', '')
+        stream_id = canal.get('stream_id')
+        
+        # Xtream suele usar .ts para live, aunque el panel diga otra cosa
+        link = f"{host}/live/{user}/{passw}/{stream_id}.ts"
+        
+        # Formato estándar #EXTINF
+        contenido += f'#EXTINF:-1 tvg-id="{epg_id}" tvg-logo="{logo}" group-title="Mi Lista Personalizada",{nombre}\n'
+        contenido += f'{link}\n'
+    return contenido
+
+# --- INTERFAZ ---
+
+tab1, tab2, tab3, tab4 = st.tabs(["🔍 Una Cuenta", "📋 Lista Masiva", "📥 Descargas VOD", "🛠️ Crear Lista M3U"])
 
 # Pestaña 1
 with tab1:
-    u = st.text_input("Enlace:")
-    if st.button("Verificar"):
+    u = st.text_input("Enlace:", key="t1_in")
+    if st.button("Verificar", key="t1_btn"):
         res = verificar_url(u)
         if res and "Usuario" in res:
             st.success(f"Usuario: {res['Usuario']}")
@@ -110,9 +133,9 @@ with tab2:
         res = [verificar_url(x) for x in urls if len(x)>10]
         st.dataframe(pd.DataFrame([r for r in res if r]))
 
-# Pestaña 3 (CON BUSCADOR FILTRADO)
+# Pestaña 3 (Descargas)
 with tab3:
-    st.header("Descargas con Filtro")
+    st.header("Buscador VOD")
     link_vod = st.text_input("Pega tu cuenta:", key="vod_input")
     tipo = st.radio("Tipo:", ["🎬 Películas", "📺 Series"], horizontal=True)
 
@@ -121,7 +144,6 @@ with tab3:
         if url_clean:
             host, user, pw = extraer_credenciales(url_clean)
 
-            # LÓGICA PELÍCULAS
             if tipo == "🎬 Películas":
                 if st.button("Descargar Catálogo"):
                     with st.spinner("Bajando lista..."):
@@ -129,19 +151,11 @@ with tab3:
                 
                 if 'df_pelis' in st.session_state and st.session_state['df_pelis'] is not None:
                     df = st.session_state['df_pelis']
-                    # EL BUSCADOR
-                    filtro = st.text_input("🔍 Buscar Película:", placeholder="Ej: Batman")
-                    
-                    if filtro:
-                        df_show = df[df['Título'].str.contains(filtro, case=False, na=False)]
-                    else:
-                        df_show = df
-
-                    st.write(f"Viendo {len(df_show)} resultados:")
+                    filtro = st.text_input("🔍 Buscar:", placeholder="Batman", key="f_peli")
+                    df_show = df[df['Título'].str.contains(filtro, case=False, na=False)] if filtro else df
                     st.dataframe(df_show, use_container_width=True, hide_index=True,
                                  column_config={"Link": st.column_config.LinkColumn("Bajar", display_text="⬇️ Video")})
 
-            # LÓGICA SERIES
             elif tipo == "📺 Series":
                 if 'lista_series' not in st.session_state:
                     if st.button("1️⃣ Cargar Series"):
@@ -151,22 +165,71 @@ with tab3:
                 
                 if 'lista_series' in st.session_state:
                     series = list(st.session_state['lista_series'].keys())
-                    seleccion = st.selectbox("Selecciona Serie (Escribe para buscar):", series)
-                    
+                    seleccion = st.selectbox("Serie:", series)
                     if st.button(f"2️⃣ Ver caps de: {seleccion}"):
                         sid = st.session_state['lista_series'][seleccion]
-                        with st.spinner("Buscando episodios..."):
+                        with st.spinner("Buscando..."):
                             st.session_state['df_eps'] = obtener_episodios(host, user, pw, sid)
                     
                     if 'df_eps' in st.session_state:
-                        # Filtro de episodios
-                        f_ep = st.text_input("Filtrar episodio:", placeholder="Ej: T1 E1")
-                        df_e = st.session_state['df_eps']
-                        if f_ep: df_e = df_e[df_e['Episodio'].str.contains(f_ep, case=False)]
-                        
-                        st.dataframe(df_e, use_container_width=True, hide_index=True,
+                        st.dataframe(st.session_state['df_eps'], use_container_width=True, hide_index=True,
                                      column_config={"Link": st.column_config.LinkColumn("Bajar", display_text="⬇️ Ver")})
-                    
-                    if st.button("Borrar todo"):
-                        st.session_state.clear()
+                    if st.button("Limpiar Series"):
+                        del st.session_state['lista_series']
                         st.rerun()
+
+# --- PESTAÑA 4: CREADOR DE M3U (NUEVO) ---
+with tab4:
+    st.header("🛠️ Crear Lista M3U Personalizada")
+    st.info("Selecciona solo los canales que quieres y descarga un archivo .m3u limpio.")
+    
+    link_m3u = st.text_input("Pega tu cuenta:", key="m3u_input")
+    
+    if link_m3u:
+        url_c = limpiar_url(link_m3u)
+        if url_c:
+            host_m, user_m, pw_m = extraer_credenciales(url_c)
+            
+            # Botón para cargar canales
+            if st.button("📡 Cargar Canales en Vivo"):
+                with st.spinner("Descargando lista completa de canales..."):
+                    canales_raw = obtener_canales_live(host_m, user_m, pw_m)
+                    if canales_raw:
+                        st.session_state['todos_canales'] = canales_raw
+                        st.success(f"¡Cargados {len(canales_raw)} canales!")
+                    else:
+                        st.error("No se pudieron cargar los canales.")
+
+            # Si ya tenemos canales, mostramos el selector
+            if 'todos_canales' in st.session_state:
+                todos = st.session_state['todos_canales']
+                
+                # Crear lista de nombres para el selector
+                # Usamos un diccionario para recuperar el objeto completo después
+                mapa_canales = {c['name']: c for c in todos}
+                nombres = list(mapa_canales.keys())
+                
+                st.write("---")
+                st.write("👇 **Busca y selecciona tus canales favoritos:**")
+                
+                # Multiselect poderoso de Streamlit
+                seleccionados = st.multiselect(
+                    "Escribe para buscar (Deportes, Noticias, etc):",
+                    options=nombres,
+                    placeholder="Elige los canales que quieres..."
+                )
+                
+                if seleccionados:
+                    st.write(f"Has seleccionado **{len(seleccionados)}** canales.")
+                    
+                    # Generar el archivo en memoria
+                    objetos_seleccionados = [mapa_canales[n] for n in seleccionados]
+                    archivo_m3u = generar_m3u(objetos_seleccionados, host_m, user_m, pw_m)
+                    
+                    # Botón de Descarga
+                    st.download_button(
+                        label="💾 DESCARGAR MI LISTA .M3U",
+                        data=archivo_m3u,
+                        file_name="mi_lista_personalizada.m3u",
+                        mime="text/plain"
+                    )
