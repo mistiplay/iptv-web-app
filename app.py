@@ -4,10 +4,10 @@ import pandas as pd
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 
-# CONFIGURACIÓN DE PÁGINA
+# --- CONFIGURACIÓN ---
 st.set_page_config(page_title="IPTV Tool Pro", page_icon="📺", layout="wide")
 st.title("📺 IPTV Tool Web")
-st.markdown("Generador de Listas **Compatible con Maxplayer**.")
+st.markdown("Generador de Listas **Reparado para Maxplayer**.")
 
 # --- FUNCIONES ---
 
@@ -90,35 +90,29 @@ def obtener_canales_live(host, user, passw):
         return r.json()
     except: return None
 
-# --- AQUÍ ESTÁ EL ARREGLO PARA MAXPLAYER ---
-def generar_m3u(canales_seleccionados, host, user, passw):
+# --- LA FUNCIÓN CORREGIDA (FORMATO BÁSICO) ---
+def generar_m3u_seguro(canales_seleccionados, host, user, passw):
     contenido = "#EXTM3U\n"
     for canal in canales_seleccionados:
-        # 1. LIMPIEZA AGRESIVA DE NOMBRE
-        # Maxplayer se rompe con comillas o caracteres raros. Los quitamos.
-        nombre_sucio = canal.get('name', 'Sin Nombre')
-        nombre_limpio = nombre_sucio.replace('"', '').replace("'", "").replace(",", " ").replace(":", " ")
-        
-        logo = canal.get('stream_icon', '')
-        if not logo: logo = "" # Evitar nulos
-        
-        epg_id = canal.get('epg_channel_id', '')
-        if not epg_id: epg_id = ""
+        # 1. Limpieza total del nombre (quitamos comillas y comas que rompen Maxplayer)
+        nombre_original = canal.get('name', 'Canal Sin Nombre')
+        # Reemplazamos caracteres peligrosos por espacios
+        nombre = nombre_original.replace('"', '').replace(',', ' ').strip()
         
         stream_id = canal.get('stream_id')
-        
         link = f"{host}/live/{user}/{passw}/{stream_id}.ts"
         
-        # 2. FORMATO ESTRICTO
-        # Aseguramos que tvg-name y el nombre final sean idénticos y limpios
-        contenido += f'#EXTINF:-1 tvg-id="{epg_id}" tvg-name="{nombre_limpio}" tvg-logo="{logo}" group-title="Mi Lista",{nombre_limpio}\n'
+        # 2. Formato MÍNIMO VIABLE
+        # Quitamos tvg-id, logos y metadatos extra. Solo dejamos el grupo y el nombre.
+        # Esto evita que el parser de Maxplayer falle por datos vacíos.
+        contenido += f'#EXTINF:-1 group-title="Mi Lista VIP",{nombre}\n'
         contenido += f'{link}\n'
         
     return contenido
 
 # --- INTERFAZ ---
 
-tab1, tab2, tab3, tab4 = st.tabs(["🔍 Una Cuenta", "📋 Lista Masiva", "📥 Descargas VOD", "🛠️ Crear M3U (Maxplayer)"])
+tab1, tab2, tab3, tab4 = st.tabs(["🔍 Una Cuenta", "📋 Lista Masiva", "📥 Descargas VOD", "🛠️ Generar M3U (Maxplayer)"])
 
 # Pestaña 1
 with tab1:
@@ -186,10 +180,10 @@ with tab3:
                         del st.session_state['lista_series']
                         st.rerun()
 
-# PESTAÑA 4 - ARREGLADA PARA MAXPLAYER
+# --- PESTAÑA 4 CORREGIDA ---
 with tab4:
-    st.header("🛠️ Crear M3U para Maxplayer")
-    st.info("Esta herramienta limpia los nombres de los canales para evitar errores al subir la lista.")
+    st.header("🛠️ Crear Lista para Maxplayer")
+    st.info("Genera un archivo .m3u simplificado para evitar errores de lectura.")
     
     link_m3u = st.text_input("Pega tu cuenta:", key="m3u_input")
     
@@ -218,11 +212,12 @@ with tab4:
                     st.success(f"{len(seleccionados)} canales seleccionados.")
                     
                     objs = [mapa[n] for n in seleccionados]
-                    contenido_m3u = generar_m3u(objs, host_m, user_m, pw_m)
+                    # USAMOS LA FUNCIÓN SEGURA
+                    contenido_m3u = generar_m3u_seguro(objs, host_m, user_m, pw_m)
                     
                     st.download_button(
-                        label="⬇️ DESCARGAR LISTA COMPATIBLE MAXPLAYER (.m3u)",
+                        label="⬇️ DESCARGAR LISTA COMPATIBLE (.m3u)",
                         data=contenido_m3u,
-                        file_name="lista_maxplayer.m3u",
+                        file_name="lista_maxplayer_v2.m3u",
                         mime="text/plain"
                     )
