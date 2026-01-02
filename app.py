@@ -4,10 +4,10 @@ import pandas as pd
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 
-# 1. CONFIGURACIÓN (Siempre primero)
+# CONFIGURACIÓN DE PÁGINA
 st.set_page_config(page_title="IPTV Tool Pro", page_icon="📺", layout="wide")
 st.title("📺 IPTV Tool Web")
-st.markdown("Verificador, Descargador y **Creador de Listas M3U**.")
+st.markdown("Generador de Listas **Compatible con Maxplayer**.")
 
 # --- FUNCIONES ---
 
@@ -83,34 +83,42 @@ def obtener_episodios(host, user, passw, series_id):
         return pd.DataFrame(lista_episodios)
     except: return None
 
-# Función NUEVA para canales en vivo
 def obtener_canales_live(host, user, passw):
     url = f"{host}/player_api.php?username={user}&password={passw}&action=get_live_streams"
     try:
         r = requests.get(url, timeout=35)
-        return r.json() # Devolvemos la lista cruda para procesarla
+        return r.json()
     except: return None
 
+# --- AQUÍ ESTÁ EL ARREGLO PARA MAXPLAYER ---
 def generar_m3u(canales_seleccionados, host, user, passw):
-    # Cabecera M3U
     contenido = "#EXTM3U\n"
     for canal in canales_seleccionados:
-        nombre = canal.get('name', 'Sin Nombre')
+        # 1. LIMPIEZA AGRESIVA DE NOMBRE
+        # Maxplayer se rompe con comillas o caracteres raros. Los quitamos.
+        nombre_sucio = canal.get('name', 'Sin Nombre')
+        nombre_limpio = nombre_sucio.replace('"', '').replace("'", "").replace(",", " ").replace(":", " ")
+        
         logo = canal.get('stream_icon', '')
+        if not logo: logo = "" # Evitar nulos
+        
         epg_id = canal.get('epg_channel_id', '')
+        if not epg_id: epg_id = ""
+        
         stream_id = canal.get('stream_id')
         
-        # Xtream suele usar .ts para live, aunque el panel diga otra cosa
         link = f"{host}/live/{user}/{passw}/{stream_id}.ts"
         
-        # Formato estándar #EXTINF
-        contenido += f'#EXTINF:-1 tvg-id="{epg_id}" tvg-logo="{logo}" group-title="Mi Lista Personalizada",{nombre}\n'
+        # 2. FORMATO ESTRICTO
+        # Aseguramos que tvg-name y el nombre final sean idénticos y limpios
+        contenido += f'#EXTINF:-1 tvg-id="{epg_id}" tvg-name="{nombre_limpio}" tvg-logo="{logo}" group-title="Mi Lista",{nombre_limpio}\n'
         contenido += f'{link}\n'
+        
     return contenido
 
 # --- INTERFAZ ---
 
-tab1, tab2, tab3, tab4 = st.tabs(["🔍 Una Cuenta", "📋 Lista Masiva", "📥 Descargas VOD", "🛠️ Crear Lista M3U"])
+tab1, tab2, tab3, tab4 = st.tabs(["🔍 Una Cuenta", "📋 Lista Masiva", "📥 Descargas VOD", "🛠️ Crear M3U (Maxplayer)"])
 
 # Pestaña 1
 with tab1:
@@ -133,7 +141,7 @@ with tab2:
         res = [verificar_url(x) for x in urls if len(x)>10]
         st.dataframe(pd.DataFrame([r for r in res if r]))
 
-# Pestaña 3 (Descargas)
+# Pestaña 3
 with tab3:
     st.header("Buscador VOD")
     link_vod = st.text_input("Pega tu cuenta:", key="vod_input")
@@ -178,10 +186,10 @@ with tab3:
                         del st.session_state['lista_series']
                         st.rerun()
 
-# --- PESTAÑA 4: CREADOR DE M3U (NUEVO) ---
+# PESTAÑA 4 - ARREGLADA PARA MAXPLAYER
 with tab4:
-    st.header("🛠️ Crear Lista M3U Personalizada")
-    st.info("Selecciona solo los canales que quieres y descarga un archivo .m3u limpio.")
+    st.header("🛠️ Crear M3U para Maxplayer")
+    st.info("Esta herramienta limpia los nombres de los canales para evitar errores al subir la lista.")
     
     link_m3u = st.text_input("Pega tu cuenta:", key="m3u_input")
     
@@ -190,46 +198,31 @@ with tab4:
         if url_c:
             host_m, user_m, pw_m = extraer_credenciales(url_c)
             
-            # Botón para cargar canales
-            if st.button("📡 Cargar Canales en Vivo"):
-                with st.spinner("Descargando lista completa de canales..."):
-                    canales_raw = obtener_canales_live(host_m, user_m, pw_m)
-                    if canales_raw:
-                        st.session_state['todos_canales'] = canales_raw
-                        st.success(f"¡Cargados {len(canales_raw)} canales!")
-                    else:
-                        st.error("No se pudieron cargar los canales.")
-
-            # Si ya tenemos canales, mostramos el selector
+            if st.button("📡 Cargar Canales"):
+                with st.spinner("Descargando lista..."):
+                    st.session_state['todos_canales'] = obtener_canales_live(host_m, user_m, pw_m)
+                    
             if 'todos_canales' in st.session_state:
                 todos = st.session_state['todos_canales']
-                
-                # Crear lista de nombres para el selector
-                # Usamos un diccionario para recuperar el objeto completo después
-                mapa_canales = {c['name']: c for c in todos}
-                nombres = list(mapa_canales.keys())
+                mapa = {c['name']: c for c in todos}
+                nombres = list(mapa.keys())
                 
                 st.write("---")
-                st.write("👇 **Busca y selecciona tus canales favoritos:**")
-                
-                # Multiselect poderoso de Streamlit
                 seleccionados = st.multiselect(
-                    "Escribe para buscar (Deportes, Noticias, etc):",
+                    "Selecciona los canales:",
                     options=nombres,
-                    placeholder="Elige los canales que quieres..."
+                    placeholder="Escribe para buscar..."
                 )
                 
                 if seleccionados:
-                    st.write(f"Has seleccionado **{len(seleccionados)}** canales.")
+                    st.success(f"{len(seleccionados)} canales seleccionados.")
                     
-                    # Generar el archivo en memoria
-                    objetos_seleccionados = [mapa_canales[n] for n in seleccionados]
-                    archivo_m3u = generar_m3u(objetos_seleccionados, host_m, user_m, pw_m)
+                    objs = [mapa[n] for n in seleccionados]
+                    contenido_m3u = generar_m3u(objs, host_m, user_m, pw_m)
                     
-                    # Botón de Descarga
                     st.download_button(
-                        label="💾 DESCARGAR MI LISTA .M3U",
-                        data=archivo_m3u,
-                        file_name="mi_lista_personalizada.m3u",
+                        label="⬇️ DESCARGAR LISTA COMPATIBLE MAXPLAYER (.m3u)",
+                        data=contenido_m3u,
+                        file_name="lista_maxplayer.m3u",
                         mime="text/plain"
                     )
