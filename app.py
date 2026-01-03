@@ -1,13 +1,14 @@
 import streamlit as st
 import requests
 import pandas as pd
+import concurrent.futures
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 
 # CONFIGURACIÓN
 st.set_page_config(page_title="IPTV Tool Pro", page_icon="📺", layout="wide")
 st.title("📺 IPTV Tool Web")
-st.markdown("Generador compatible con **Maxplayer Web**.")
+st.markdown("Generador M3U: **Canales a elección + TODO Cine y Series**.")
 
 # --- FUNCIONES ---
 
@@ -46,71 +47,72 @@ def verificar_url(url_raw):
         }
     except: return {"Estado": "Error"}
 
-def obtener_peliculas(url_api, host, user, passw):
+# --- FUNCIONES DE CARGA ---
+@st.cache_data(ttl=600)
+def obtener_todo_live(host, user, passw):
+    url = f"{host}/player_api.php?username={user}&password={passw}&action=get_live_streams"
+    try: return requests.get(url, timeout=30).json()
+    except: return []
+
+@st.cache_data(ttl=600)
+def obtener_todo_vod(host, user, passw):
     url = f"{host}/player_api.php?username={user}&password={passw}&action=get_vod_streams"
-    try:
-        r = requests.get(url, timeout=30)
-        data = r.json()
-        lista = []
-        for item in data:
-            ext = item.get('container_extension', 'mp4')
-            link = f"{host}/movie/{user}/{passw}/{item['stream_id']}.{ext}"
-            lista.append({"Título": item['name'], "Formato": ext, "Link": link})
-        return pd.DataFrame(lista)
-    except: return None
+    try: return requests.get(url, timeout=30).json()
+    except: return []
 
-def obtener_lista_series(url_api, host, user, passw):
+@st.cache_data(ttl=600)
+def obtener_todo_series_lista(host, user, passw):
     url = f"{host}/player_api.php?username={user}&password={passw}&action=get_series"
-    try:
-        r = requests.get(url, timeout=30)
-        data = r.json()
-        return {item['name']: item['series_id'] for item in data}
-    except: return None
+    try: return requests.get(url, timeout=30).json()
+    except: return []
 
-def obtener_episodios(host, user, passw, series_id):
+def obtener_episodios_serie_individual(args):
+    """Función auxiliar para descarga paralela"""
+    host, user, passw, series_id = args
     url = f"{host}/player_api.php?username={user}&password={passw}&action=get_series_info&series_id={series_id}"
     try:
-        r = requests.get(url, timeout=15)
-        data = r.json()
-        episodes = data.get('episodes', {})
-        lista_episodios = []
-        for season_num, eps in episodes.items():
-            for ep in eps:
-                ext = ep.get('container_extension', 'mp4')
-                link = f"{host}/series/{user}/{passw}/{ep['id']}.{ext}"
-                nombre_cap = f"T{season_num} E{ep['episode_num']} - {ep['title']}"
-                lista_episodios.append({"Episodio": nombre_cap, "Formato": ext, "Link": link})
-        return pd.DataFrame(lista_episodios)
-    except: return None
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            return r.json().get('episodes', {})
+    except:
+        pass
+    return {}
 
-def obtener_canales_live(host, user, passw):
-    url = f"{host}/player_api.php?username={user}&password={passw}&action=get_live_streams"
-    try:
-        r = requests.get(url, timeout=35)
-        return r.json()
-    except: return None
-
-# --- LA SOLUCIÓN DEL ARCHIVO ---
-def generar_m3u_windows(canales, host, user, passw):
-    # Usamos \r\n para forzar formato Windows que Maxplayer entiende mejor
+# --- GENERADOR M3U ---
+def generar_m3u_completo(items_live, items_vod, items_episodios, host, user, passw):
     contenido = "#EXTM3U\r\n"
-    for c in canales:
-        nombre = c.get('name', 'Canal').replace('"', '').replace(',', ' ').strip()
+    
+    # 1. CANALES (Seleccionados por usuario)
+    for c in items_live:
+        nombre = c.get('name', '').replace('"', '').replace(',', ' ').strip()
         sid = c.get('stream_id')
         link = f"{host}/live/{user}/{passw}/{sid}.ts"
-        
-        # Formato estándar con saltos de línea Windows
-        contenido += f'#EXTINF:-1 group-title="Mi Lista",{nombre}\r\n{link}\r\n'
+        contenido += f'#EXTINF:-1 group-title="TV en Vivo",{nombre}\r\n{link}\r\n'
+
+    # 2. PELÍCULAS (Todas)
+    for p in items_vod:
+        nombre = p.get('name', '').replace('"', '').replace(',', ' ').strip()
+        sid = p.get('stream_id')
+        ext = p.get('container_extension', 'mp4')
+        link = f"{host}/movie/{user}/{passw}/{sid}.{ext}"
+        contenido += f'#EXTINF:-1 group-title="Peliculas",{nombre}\r\n{link}\r\n'
+
+    # 3. SERIES (Todas las procesadas)
+    for s in items_episodios:
+        nombre = s['name'].replace('"', '').replace(',', ' ').strip()
+        link = s['link']
+        contenido += f'#EXTINF:-1 group-title="Series",{nombre}\r\n{link}\r\n'
+
     return contenido
 
 # --- INTERFAZ ---
 
-tab1, tab2, tab3, tab4 = st.tabs(["🔍 Una Cuenta", "📋 Lista Masiva", "📥 Descargas VOD", "🛠️ Generar M3U (Archivo Físico)"])
+tab1, tab2, tab4 = st.tabs(["🔍 Una Cuenta", "📋 Lista Masiva", "🛠️ Creador M3U (Auto)"])
 
 # PESTAÑA 1
 with tab1:
     u = st.text_input("Enlace:", key="t1_in")
-    if st.button("Verificar", key="t1_btn"):
+    if st.button("Verificar"):
         res = verificar_url(u)
         if res and "Usuario" in res:
             st.success(f"Usuario: {res['Usuario']}")
@@ -118,65 +120,20 @@ with tab1:
             c1.metric("Estado", res["Estado"])
             c2.metric("Vence", res["Vence"])
             c3.metric("Conexiones", res["Conexiones"])
-        else: st.error("Error al conectar.")
+        else: st.error("Error.")
 
 # PESTAÑA 2
 with tab2:
     txt = st.text_area("Lista:")
-    if st.button("Procesar Lista"):
+    if st.button("Procesar"):
         urls = txt.split('\n')
         res = [verificar_url(x) for x in urls if len(x)>10]
         st.dataframe(pd.DataFrame([r for r in res if r]))
 
-# PESTAÑA 3
-with tab3:
-    st.header("Buscador VOD")
-    link_vod = st.text_input("Pega tu cuenta:", key="vod_input")
-    tipo = st.radio("Tipo:", ["🎬 Películas", "📺 Series"], horizontal=True)
-
-    if link_vod:
-        url_clean = limpiar_url(link_vod)
-        if url_clean:
-            host, user, pw = extraer_credenciales(url_clean)
-
-            if tipo == "🎬 Películas":
-                if st.button("Descargar Catálogo"):
-                    with st.spinner("Bajando lista..."):
-                        st.session_state['df_pelis'] = obtener_peliculas(url_clean, host, user, pw)
-                
-                if 'df_pelis' in st.session_state and st.session_state['df_pelis'] is not None:
-                    df = st.session_state['df_pelis']
-                    filtro = st.text_input("🔍 Buscar:", placeholder="Batman", key="f_peli")
-                    df_show = df[df['Título'].str.contains(filtro, case=False, na=False)] if filtro else df
-                    st.dataframe(df_show, use_container_width=True, hide_index=True,
-                                 column_config={"Link": st.column_config.LinkColumn("Bajar", display_text="⬇️ Video")})
-
-            elif tipo == "📺 Series":
-                if 'lista_series' not in st.session_state:
-                    if st.button("1️⃣ Cargar Series"):
-                        with st.spinner("Leyendo series..."):
-                            st.session_state['lista_series'] = obtener_lista_series(url_clean, host, user, pw)
-                            st.rerun()
-                
-                if 'lista_series' in st.session_state:
-                    series = list(st.session_state['lista_series'].keys())
-                    seleccion = st.selectbox("Serie:", series)
-                    if st.button(f"2️⃣ Ver caps de: {seleccion}"):
-                        sid = st.session_state['lista_series'][seleccion]
-                        with st.spinner("Buscando..."):
-                            st.session_state['df_eps'] = obtener_episodios(host, user, pw, sid)
-                    
-                    if 'df_eps' in st.session_state:
-                        st.dataframe(st.session_state['df_eps'], use_container_width=True, hide_index=True,
-                                     column_config={"Link": st.column_config.LinkColumn("Bajar", display_text="⬇️ Ver")})
-                    if st.button("Limpiar Series"):
-                        del st.session_state['lista_series']
-                        st.rerun()
-
-# PESTAÑA 4: ARCHIVO CORREGIDO
+# --- PESTAÑA 4: LÓGICA AUTOMÁTICA ---
 with tab4:
-    st.header("🛠️ Crear Archivo para Maxplayer")
-    st.warning("IMPORTANTE: En Maxplayer Web, selecciona la opción 'M3U File' (la tercera). No uses 'Xtream URL'.")
+    st.header("🛠️ Creador de Listas M3U")
+    st.info("Elige tus canales. Las Películas y Series se añadirán TODAS automáticamente.")
     
     link_m3u = st.text_input("Pega tu cuenta:", key="m3u_input")
     
@@ -185,28 +142,106 @@ with tab4:
         if url_c:
             host_m, user_m, pw_m = extraer_credenciales(url_c)
             
-            if st.button("📡 Cargar Canales"):
-                with st.spinner("Descargando lista..."):
-                    st.session_state['todos_canales'] = obtener_canales_live(host_m, user_m, pw_m)
-                    
-            if 'todos_canales' in st.session_state:
-                todos = st.session_state['todos_canales']
-                mapa = {c['name']: c for c in todos}
-                nombres = list(mapa.keys())
+            if st.button("📡 Cargar Información del Servidor"):
+                with st.spinner("Descargando catálogos..."):
+                    st.session_state['data_live'] = obtener_todo_live(host_m, user_m, pw_m)
+                    st.session_state['data_vod'] = obtener_todo_vod(host_m, user_m, pw_m)
+                    st.session_state['data_series_list'] = obtener_todo_series_lista(host_m, user_m, pw_m)
+                    st.success("¡Datos cargados!")
+
+            if 'data_live' in st.session_state:
                 
+                # 1. SELECCIÓN DE CANALES (Con filtro rápido)
                 st.write("---")
-                seleccionados = st.multiselect("Selecciona los canales:", options=nombres)
+                st.subheader("📺 1. Selecciona los Canales")
+                live_data = st.session_state['data_live']
                 
-                if seleccionados:
-                    st.success(f"{len(seleccionados)} canales seleccionados.")
+                if live_data:
+                    # Filtro por categoría
+                    cats = sorted(list(set([x.get('category_id', 'Sin Cat') for x in live_data])))
+                    cat_sel = st.multiselect("Filtrar por Categoría (Opcional):", cats)
                     
-                    objs = [mapa[n] for n in seleccionados]
-                    # Generamos con formato Windows (\r\n)
-                    contenido_final = generar_m3u_windows(objs, host_m, user_m, pw_m)
+                    if cat_sel:
+                        live_view = [x for x in live_data if x.get('category_id') in cat_sel]
+                    else:
+                        live_view = live_data # Cuidado si son muchos
+
+                    # Mapeo para nombres únicos
+                    mapa_live = {f"{c['name']} (ID:{c['stream_id']})": c for c in live_view}
                     
+                    sel_keys = st.multiselect(
+                        f"Elige canales ({len(live_view)} disponibles):",
+                        options=list(mapa_live.keys())
+                    )
+                    st.session_state['final_live'] = [mapa_live[k] for k in sel_keys]
+                
+                # 2. INFORMACIÓN VOD y SERIES (Solo informativo)
+                st.write("---")
+                c_vod, c_ser = st.columns(2)
+                
+                with c_vod:
+                    st.subheader("🎬 Películas")
+                    n_peli = len(st.session_state['data_vod'])
+                    st.success(f"✅ Se añadirán {n_peli} películas automáticamente.")
+                
+                with c_ser:
+                    st.subheader("📺 Series")
+                    n_ser = len(st.session_state['data_series_list'])
+                    st.warning(f"⚠️ Hay {n_ser} series disponibles.")
+                    st.caption("Al generar, el sistema descargará los episodios de TODAS. Esto puede tardar un poco.")
+
+                # BOTÓN FINAL
+                st.write("---")
+                if st.button("💾 GENERAR LISTA COMPLETA"):
+                    canales_elegidos = st.session_state.get('final_live', [])
+                    peliculas_todas = st.session_state.get('data_vod', [])
+                    series_lista = st.session_state.get('data_series_list', [])
+                    
+                    if not canales_elegidos:
+                        st.warning("No elegiste ningún canal, pero generaremos la lista con Pelis y Series.")
+                    
+                    episodios_finales = []
+                    
+                    # PROCESAMIENTO MULTI-HILO PARA SERIES (Para que no sea eterno)
+                    if series_lista:
+                        status_text = st.empty()
+                        progress_bar = st.progress(0)
+                        total_series = len(series_lista)
+                        
+                        # Preparamos los argumentos para cada hilo
+                        args_list = [(host_m, user_m, pw_m, s['series_id']) for s in series_lista]
+                        
+                        # Usamos 10 hilos simultáneos
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                            # Lanzamos todas las tareas
+                            futures = {executor.submit(obtener_episodios_serie_individual, arg): arg for arg in args_list}
+                            
+                            completed = 0
+                            for future in concurrent.futures.as_completed(futures):
+                                data_eps = future.result()
+                                # Procesamos los episodios recibidos
+                                for season, eps in data_eps.items():
+                                    for ep in eps:
+                                        ext = ep.get('container_extension', 'mp4')
+                                        link = f"{host_m}/series/{user_m}/{pw_m}/{ep['id']}.{ext}"
+                                        full_name = f"{ep['title']} - S{season}E{ep['episode_num']}"
+                                        episodios_finales.append({'name': full_name, 'link': link})
+                                
+                                completed += 1
+                                if completed % 5 == 0: # Actualizar barra cada 5 series
+                                    progress_bar.progress(completed / total_series)
+                                    status_text.text(f"Procesando series: {completed}/{total_series}")
+                        
+                        status_text.text("¡Series procesadas!")
+                        progress_bar.progress(1.0)
+
+                    # Generar Archivo
+                    contenido = generar_m3u_completo(canales_elegidos, peliculas_todas, episodios_finales, host_m, user_m, pw_m)
+                    
+                    st.balloons()
                     st.download_button(
-                        label="⬇️ Descargar Archivo .m3u (Formato Maxplayer)", 
-                        data=contenido_final, 
-                        file_name="lista_maxplayer_fix.m3u",
+                        label="⬇️ DESCARGAR LISTA DEFINITIVA (.m3u)",
+                        data=contenido,
+                        file_name="lista_full_maxplayer.m3u",
                         mime="text/plain"
                     )
