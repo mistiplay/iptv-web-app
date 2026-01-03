@@ -4,12 +4,12 @@ import pandas as pd
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 
-# --- CONFIGURACIÓN ---
+# CONFIGURACIÓN
 st.set_page_config(page_title="IPTV Tool Pro", page_icon="📺", layout="wide")
 st.title("📺 IPTV Tool Web")
-st.markdown("Generador de Listas **Reparado para Maxplayer**.")
+st.markdown("Generador Multi-Formato para **Maxplayer**.")
 
-# --- FUNCIONES ---
+# --- FUNCIONES BASE ---
 
 def limpiar_url(url_raw):
     url = url_raw.strip()
@@ -90,31 +90,43 @@ def obtener_canales_live(host, user, passw):
         return r.json()
     except: return None
 
-# --- LA FUNCIÓN CORREGIDA (FORMATO BÁSICO) ---
-def generar_m3u_seguro(canales_seleccionados, host, user, passw):
+# --- GENERADORES DE FORMATOS (LA SOLUCIÓN) ---
+
+def generar_m3u_v1_ts(canales, host, user, passw):
+    # Formato Estándar (Links .ts)
     contenido = "#EXTM3U\n"
-    for canal in canales_seleccionados:
-        # 1. Limpieza total del nombre (quitamos comillas y comas que rompen Maxplayer)
-        nombre_original = canal.get('name', 'Canal Sin Nombre')
-        # Reemplazamos caracteres peligrosos por espacios
-        nombre = nombre_original.replace('"', '').replace(',', ' ').strip()
-        
-        stream_id = canal.get('stream_id')
-        link = f"{host}/live/{user}/{passw}/{stream_id}.ts"
-        
-        # 2. Formato MÍNIMO VIABLE
-        # Quitamos tvg-id, logos y metadatos extra. Solo dejamos el grupo y el nombre.
-        # Esto evita que el parser de Maxplayer falle por datos vacíos.
-        contenido += f'#EXTINF:-1 group-title="Mi Lista VIP",{nombre}\n'
-        contenido += f'{link}\n'
-        
+    for c in canales:
+        nombre = c.get('name', '').replace('"', '').replace(',', ' ').strip()
+        sid = c.get('stream_id')
+        link = f"{host}/live/{user}/{passw}/{sid}.ts"
+        contenido += f'#EXTINF:-1 group-title="Mi Lista",{nombre}\n{link}\n'
+    return contenido
+
+def generar_m3u_v2_api(canales, host, user, passw):
+    # Formato API (Links get.php?...) - A veces Maxplayer prefiere este
+    contenido = "#EXTM3U\n"
+    for c in canales:
+        nombre = c.get('name', '').replace('"', '').replace(',', ' ').strip()
+        sid = c.get('stream_id')
+        # Usamos la estructura de API en el link
+        link = f"{host}/get.php?username={user}&password={passw}&stream_id={sid}"
+        contenido += f'#EXTINF:-1 group-title="Mi Lista",{nombre}\n{link}\n'
+    return contenido
+
+def generar_m3u_v3_minimal(canales, host, user, passw):
+    # Formato Minimalista (Sin group-title, sin nada extra)
+    contenido = "#EXTM3U\n"
+    for c in canales:
+        nombre = c.get('name', '').replace('"', '').replace(',', ' ').strip()
+        sid = c.get('stream_id')
+        link = f"{host}/live/{user}/{passw}/{sid}.ts"
+        contenido += f'#EXTINF:-1,{nombre}\n{link}\n'
     return contenido
 
 # --- INTERFAZ ---
 
-tab1, tab2, tab3, tab4 = st.tabs(["🔍 Una Cuenta", "📋 Lista Masiva", "📥 Descargas VOD", "🛠️ Generar M3U (Maxplayer)"])
+tab1, tab2, tab3, tab4 = st.tabs(["🔍 Una Cuenta", "📋 Lista Masiva", "📥 Descargas VOD", "🛠️ Generar M3U (3 Formatos)"])
 
-# Pestaña 1
 with tab1:
     u = st.text_input("Enlace:", key="t1_in")
     if st.button("Verificar", key="t1_btn"):
@@ -127,7 +139,6 @@ with tab1:
             c3.metric("Conexiones", res["Conexiones"])
         else: st.error("Error al conectar.")
 
-# Pestaña 2
 with tab2:
     txt = st.text_area("Lista:")
     if st.button("Procesar Lista"):
@@ -135,36 +146,29 @@ with tab2:
         res = [verificar_url(x) for x in urls if len(x)>10]
         st.dataframe(pd.DataFrame([r for r in res if r]))
 
-# Pestaña 3
 with tab3:
     st.header("Buscador VOD")
     link_vod = st.text_input("Pega tu cuenta:", key="vod_input")
     tipo = st.radio("Tipo:", ["🎬 Películas", "📺 Series"], horizontal=True)
-
     if link_vod:
         url_clean = limpiar_url(link_vod)
         if url_clean:
             host, user, pw = extraer_credenciales(url_clean)
-
             if tipo == "🎬 Películas":
                 if st.button("Descargar Catálogo"):
                     with st.spinner("Bajando lista..."):
                         st.session_state['df_pelis'] = obtener_peliculas(url_clean, host, user, pw)
-                
                 if 'df_pelis' in st.session_state and st.session_state['df_pelis'] is not None:
                     df = st.session_state['df_pelis']
                     filtro = st.text_input("🔍 Buscar:", placeholder="Batman", key="f_peli")
                     df_show = df[df['Título'].str.contains(filtro, case=False, na=False)] if filtro else df
-                    st.dataframe(df_show, use_container_width=True, hide_index=True,
-                                 column_config={"Link": st.column_config.LinkColumn("Bajar", display_text="⬇️ Video")})
-
+                    st.dataframe(df_show, use_container_width=True, hide_index=True, column_config={"Link": st.column_config.LinkColumn("Bajar", display_text="⬇️ Video")})
             elif tipo == "📺 Series":
                 if 'lista_series' not in st.session_state:
                     if st.button("1️⃣ Cargar Series"):
                         with st.spinner("Leyendo series..."):
                             st.session_state['lista_series'] = obtener_lista_series(url_clean, host, user, pw)
                             st.rerun()
-                
                 if 'lista_series' in st.session_state:
                     series = list(st.session_state['lista_series'].keys())
                     seleccion = st.selectbox("Serie:", series)
@@ -172,18 +176,16 @@ with tab3:
                         sid = st.session_state['lista_series'][seleccion]
                         with st.spinner("Buscando..."):
                             st.session_state['df_eps'] = obtener_episodios(host, user, pw, sid)
-                    
                     if 'df_eps' in st.session_state:
-                        st.dataframe(st.session_state['df_eps'], use_container_width=True, hide_index=True,
-                                     column_config={"Link": st.column_config.LinkColumn("Bajar", display_text="⬇️ Ver")})
+                        st.dataframe(st.session_state['df_eps'], use_container_width=True, hide_index=True, column_config={"Link": st.column_config.LinkColumn("Bajar", display_text="⬇️ Ver")})
                     if st.button("Limpiar Series"):
                         del st.session_state['lista_series']
                         st.rerun()
 
-# --- PESTAÑA 4 CORREGIDA ---
+# --- PESTAÑA 4: MULTI-FORMATO ---
 with tab4:
-    st.header("🛠️ Crear Lista para Maxplayer")
-    st.info("Genera un archivo .m3u simplificado para evitar errores de lectura.")
+    st.header("🛠️ Crear M3U para Maxplayer (Prueba de Formatos)")
+    st.info("Selecciona canales y descarga los 3 formatos. Prueba cuál acepta Maxplayer.")
     
     link_m3u = st.text_input("Pega tu cuenta:", key="m3u_input")
     
@@ -202,22 +204,24 @@ with tab4:
                 nombres = list(mapa.keys())
                 
                 st.write("---")
-                seleccionados = st.multiselect(
-                    "Selecciona los canales:",
-                    options=nombres,
-                    placeholder="Escribe para buscar..."
-                )
+                seleccionados = st.multiselect("Selecciona los canales:", options=nombres)
                 
                 if seleccionados:
-                    st.success(f"{len(seleccionados)} canales seleccionados.")
-                    
+                    st.success(f"Seleccionaste {len(seleccionados)} canales.")
                     objs = [mapa[n] for n in seleccionados]
-                    # USAMOS LA FUNCIÓN SEGURA
-                    contenido_m3u = generar_m3u_seguro(objs, host_m, user_m, pw_m)
                     
-                    st.download_button(
-                        label="⬇️ DESCARGAR LISTA COMPATIBLE (.m3u)",
-                        data=contenido_m3u,
-                        file_name="lista_maxplayer_v2.m3u",
-                        mime="text/plain"
-                    )
+                    st.write("👇 **Descarga y prueba uno por uno:**")
+                    
+                    colA, colB, colC = st.columns(3)
+                    
+                    with colA:
+                        data1 = generar_m3u_v1_ts(objs, host_m, user_m, pw_m)
+                        st.download_button("Opción 1: Estándar (.ts)", data1, "lista_v1.m3u")
+                    
+                    with colB:
+                        data2 = generar_m3u_v2_api(objs, host_m, user_m, pw_m)
+                        st.download_button("Opción 2: Tipo Web (get.php)", data2, "lista_v2.m3u")
+
+                    with colC:
+                        data3 = generar_m3u_v3_minimal(objs, host_m, user_m, pw_m)
+                        st.download_button("Opción 3: Minimalista", data3, "lista_v3.m3u")
