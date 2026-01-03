@@ -1,19 +1,21 @@
 import streamlit as st
 import requests
-import re
+import pandas as pd
+from datetime import datetime
 from urllib.parse import urlparse, parse_qs
+import io
 
-# CONFIGURACIÓN
-st.set_page_config(page_title="IPTV Editor Pro", page_icon="📺", layout="wide")
-st.title("📺 IPTV Editor Web")
-st.markdown("Modifica solo los **Canales**. Películas y Series se mantienen al 100%.")
+# CONFIGURACIÓN DE PÁGINA
+st.set_page_config(page_title="IPTV Tool Completa", page_icon="📺", layout="wide")
+st.title("📺 IPTV Tool Web")
+st.markdown("Herramienta Completa: Verificador + Buscador VOD + **Editor M3U Inteligente**.")
 
-# --- FUNCIONES ---
+# --- FUNCIONES COMUNES ---
 
 def limpiar_url(url_raw):
     url = url_raw.strip()
     if not url or not url.startswith("http"): return None
-    # Estandarizamos para API
+    # Estandarizamos a player_api para consultas JSON
     return url.replace("/get.php", "/player_api.php").replace("/xmltv.php", "/player_api.php")
 
 def extraer_credenciales(url_api):
@@ -27,154 +29,245 @@ def extraer_credenciales(url_api):
         return host, username, password
     except: return None, None, None
 
-def descargar_m3u_original(host, user, passw):
-    # Construimos la URL para bajar el M3U completo directo del servidor
-    # Usamos type=m3u_plus para tener metadatos (logos, grupos)
-    url_m3u = f"{host}/get.php?username={user}&password={passw}&type=m3u_plus&output=ts"
+# --- FUNCIONES TABS 1, 2, 3 (RESTAURADAS) ---
+
+def verificar_url(url_raw):
+    url_final = limpiar_url(url_raw)
+    if not url_final: return None
     try:
-        with st.spinner("⏳ Descargando lista completa del servidor (esto puede tardar si pesa mucho)..."):
-            r = requests.get(url_m3u, timeout=60) # 60 segundos timeout para listas grandes
+        response = requests.get(url_final, timeout=10)
+        if response.status_code != 200: return {"Usuario": "Error HTTP", "Estado": f"Error {response.status_code}"}
+        data = response.json()
+        if 'user_info' not in data: return {"Usuario": "Invalido", "Estado": "No es panel"}
+        info = data['user_info']
+        ts = info.get('exp_date')
+        fecha = datetime.fromtimestamp(int(ts)).strftime('%d/%m/%Y') if ts and ts != 'null' else "Ilimitada"
+        return {
+            "Usuario": info.get('username'),
+            "Estado": "✅ Activa" if info.get('status') == 'Active' else "❌ Inactiva",
+            "Vence": fecha,
+            "Conexiones": f"{info.get('active_cons')}/{info.get('max_connections')}"
+        }
+    except: return {"Usuario": "Error", "Estado": "Error Conexión"}
+
+def obtener_peliculas_individual(host, user, passw):
+    url = f"{host}/player_api.php?username={user}&password={passw}&action=get_vod_streams"
+    try: return pd.DataFrame(requests.get(url, timeout=20).json())
+    except: return None
+
+def obtener_series_individual(host, user, passw):
+    url = f"{host}/player_api.php?username={user}&password={passw}&action=get_series"
+    try:
+        data = requests.get(url, timeout=20).json()
+        return {item['name']: item['series_id'] for item in data}
+    except: return None
+
+def obtener_episodios_individual(host, user, passw, series_id):
+    url = f"{host}/player_api.php?username={user}&password={passw}&action=get_series_info&series_id={series_id}"
+    try:
+        data = requests.get(url, timeout=10).json()
+        eps = data.get('episodes', {})
+        lista = []
+        if isinstance(eps, dict):
+            for season, chapters in eps.items():
+                for ep in chapters:
+                    ext = ep.get('container_extension', 'mp4')
+                    link = f"{host}/series/{user}/{passw}/{ep['id']}.{ext}"
+                    lista.append({"Nombre": f"T{season}E{ep['episode_num']} - {ep['title']}", "Link": link})
+        return pd.DataFrame(lista)
+    except: return None
+
+# --- FUNCIÓN TAB 4 (NUEVA LÓGICA DE STREAMING) ---
+
+def obtener_categorias_live(host, user, passw):
+    """Descarga solo las categorías de TV (rápido) para que el usuario elija."""
+    url = f"{host}/player_api.php?username={user}&password={passw}&action=get_live_categories"
+    try:
+        return requests.get(url, timeout=15).json()
+    except: return []
+
+def generar_m3u_filtrado_stream(host, user, passw, cats_permitidas_ids):
+    """
+    Descarga el M3U línea por línea y solo escribe lo que el usuario quiere.
+    Esto evita que la memoria explote y que se pierdan las series.
+    """
+    # URL de descarga del M3U completo
+    url_m3u = f"{host}/get.php?username={user}&password={passw}&type=m3u_plus&output=ts"
+    
+    # Buffer en memoria para escribir el archivo resultante
+    output = io.StringIO()
+    output.write("#EXTM3U\n")
+    
+    try:
+        # stream=True es la clave: descarga poco a poco
+        with requests.get(url_m3u, stream=True, timeout=60) as r:
             r.raise_for_status()
-            return r.text
+            
+            buffer_linea = ""
+            es_live = False
+            mantener_bloque = True
+            
+            # Iteramos sobre las líneas del archivo original
+            for linea_bytes in r.iter_lines():
+                if not linea_bytes: continue
+                linea = linea_bytes.decode('utf-8', errors='ignore').strip()
+                
+                if linea.startswith("#EXTINF"):
+                    # Analizamos la línea de información
+                    buffer_linea = linea
+                    
+                    # Detectamos si es TV en VIVO comprobando si tiene tvg-logo o atributos típicos
+                    # O más fácil: miramos el group-title
+                    # Sin embargo, en M3U puro es difícil saber si es VOD o LIVE solo con EXTINF.
+                    # Estrategia: Asumimos que queremos todo, SALVO si es un canal de una categoría no deseada.
+                    
+                    # Extraer ID de grupo
+                    # Muchos paneles ponen group-title="Noticias". Necesitamos comparar nombres.
+                    # Pero tenemos IDs permitidos. Haremos coincidencia por nombre de grupo.
+                    
+                    mantener_bloque = True # Por defecto guardamos (así salvamos Pelis y Series)
+                    
+                    # Buscamos el group-title
+                    start = linea.find('group-title="')
+                    if start != -1:
+                        end = linea.find('"', start + 13)
+                        grupo_nombre = linea[start+13:end]
+                        
+                        # AQUÍ ESTÁ EL TRUCO:
+                        # Si el grupo NO está en la lista de permitidos Y tampoco es Peli/Serie...
+                        # Como es difícil saber qué es qué, usaremos la lógica inversa:
+                        # Si el usuario eligió SOLO "Deportes", borramos todo lo que no sea "Deportes"
+                        # PERO debemos salvar Peliculas y Series.
+                        
+                        # Simplificación para estabilidad:
+                        # Si el usuario selecciona categorías, filtramos por texto exacto.
+                        if cats_permitidas_ids: # Si hay filtro activo
+                             if grupo_nombre not in cats_permitidas_ids:
+                                 # Podría ser una peli o serie. ¿Cómo saberlo?
+                                 # Generalmente Pelis/Series tienen grupos distintos o keywords.
+                                 # Para no complicar: Esta función asumirá filtrado por NOMBRE DE GRUPO exacto.
+                                 mantener_bloque = False
+                    
+                elif not linea.startswith("#"):
+                    # Es la URL
+                    url = linea
+                    
+                    # PROTECCIÓN DE VOD:
+                    # Si la URL tiene /movie/ o /series/, la forzamos a MANTENERSE siempre.
+                    if "/movie/" in url or "/series/" in url:
+                        mantener_bloque = True
+                    
+                    # Si decidimos mantener este bloque, escribimos info + url
+                    if mantener_bloque:
+                        # Limpieza de nombre para Maxplayer (quitar comillas del nombre final)
+                        if buffer_linea:
+                            parts = buffer_linea.rsplit(',', 1)
+                            if len(parts) == 2:
+                                nombre_limpio = parts[1].replace('"', '').strip()
+                                buffer_linea = f"{parts[0]},{nombre_limpio}"
+                            
+                            output.write(f"{buffer_linea}\n")
+                            output.write(f"{url}\n")
+                    
+                    buffer_linea = "" # Reset
+
+        return output.getvalue()
+    
     except Exception as e:
-        return None
-
-def parsear_y_filtrar(contenido_m3u):
-    """
-    Separa el contenido en 2 bloques:
-    1. Canales en Vivo (Para que el usuario elija)
-    2. VOD/Series (Se guardan todos automáticamente)
-    """
-    lineas = contenido_m3u.splitlines()
-    
-    items_live = []  # Lista de dicts {info, link, group}
-    items_vod = []   # Lista de strings directos (info + link)
-    
-    buffer_info = ""
-    
-    # Expresión regular para sacar el group-title="..."
-    rx_group = re.compile(r'group-title="([^"]+)"')
-    
-    for linea in lineas:
-        linea = linea.strip()
-        if not linea: continue
-        
-        if linea.startswith("#EXTINF"):
-            buffer_info = linea
-        elif not linea.startswith("#"):
-            # Es un enlace (URL)
-            url = linea
-            
-            # CLASIFICACIÓN CLAVE:
-            # Si tiene /live/ es canal. Si tiene /movie/ o /series/ es VOD.
-            if "/live/" in url:
-                # Es canal en vivo -> Lo procesamos para el selector
-                match = rx_group.search(buffer_info)
-                grupo = match.group(1) if match else "Sin Categoría"
-                
-                # Limpieza de nombre para Maxplayer
-                # Sacamos el nombre que está después de la última coma
-                nombre_sucio = buffer_info.split(',')[-1]
-                nombre_limpio = nombre_sucio.replace('"', '').strip()
-                
-                # Reconstruimos la linea info limpia para evitar errores en Maxplayer
-                # Usamos un formato seguro
-                info_segura = f'#EXTINF:-1 group-title="{grupo}",{nombre_limpio}'
-                
-                items_live.append({
-                    'group': grupo,
-                    'full_entry': f"{info_segura}\r\n{url}", # Guardamos par info+link
-                    'name': nombre_limpio
-                })
-            else:
-                # Es Película o Serie -> Lo guardamos TAL CUAL (No lo tocamos)
-                # Solo nos aseguramos de usar saltos de línea Windows por si acaso
-                items_vod.append(f"{buffer_info}\r\n{url}")
-            
-            buffer_info = "" # Reset buffer
-
-    return items_live, items_vod
+        return f"Error: {str(e)}"
 
 # --- INTERFAZ ---
 
-st.info("Paso 1: Pega tu enlace. Paso 2: Elige categorías de TV. Paso 3: Descarga.")
+tab1, tab2, tab3, tab4 = st.tabs(["🔍 Verificar", "📋 Masivo", "📥 VOD Individual", "🛠️ Editor M3U"])
 
-link_input = st.text_input("Enlace de conexión (M3U o Xtream):")
+# TABS 1, 2, 3 (CÓDIGO CLÁSICO RESTAURADO)
+with tab1:
+    u = st.text_input("Enlace:", key="t1")
+    if st.button("Verificar"):
+        res = verificar_url(u)
+        if res and "Usuario" in res:
+            st.success(f"Usuario: {res['Usuario']}")
+            c1,c2,c3 = st.columns(3)
+            c1.metric("Estado", res["Estado"])
+            c2.metric("Vence", res["Vence"])
+            c3.metric("Conexiones", res["Conexiones"])
+        else: st.error("Error conexión")
 
-if link_input:
-    url_clean = limpiar_url(link_input)
-    if url_clean:
-        host, user, passw = extraer_credenciales(url_clean)
-        
-        if 'm3u_raw' not in st.session_state:
-            if st.button("🚀 ANALIZAR MI LISTA"):
-                raw_data = descargar_m3u_original(host, user, passw)
-                if raw_data:
-                    # Parseamos
-                    live_objs, vod_list = parsear_y_filtrar(raw_data)
-                    st.session_state['live_objs'] = live_objs
-                    st.session_state['vod_list'] = vod_list
-                    st.success("¡Lista analizada correctamente!")
-                else:
-                    st.error("No se pudo descargar la lista. Verifica tu conexión o usuario/contraseña.")
+with tab2:
+    txt = st.text_area("Lista:")
+    if st.button("Procesar"):
+        urls = txt.split('\n')
+        res = [verificar_url(x) for x in urls if len(x)>10]
+        st.dataframe(pd.DataFrame([r for r in res if r]))
 
-        # Si ya tenemos los datos, mostramos el editor
-        if 'live_objs' in st.session_state:
-            live_items = st.session_state['live_objs']
-            vod_items_count = len(st.session_state['vod_list'])
+with tab3:
+    st.header("Descargas VOD (Pelis/Series)")
+    l_vod = st.text_input("Cuenta:", key="tvod")
+    t_vod = st.radio("Tipo:", ["Pelis", "Series"])
+    if l_vod and st.button("Buscar VOD"):
+        h, us, pw = extraer_credenciales(l_vod)
+        if h:
+            if t_vod == "Pelis":
+                df = obtener_peliculas_individual(h, us, pw)
+                if df is not None:
+                     f = st.text_input("Filtrar nombre:", key="fvod")
+                     if f: df = df[df[0 if 0 in df.columns else 'name'].astype(str).str.contains(f, case=False)]
+                     st.dataframe(df)
+            else:
+                s_dict = obtener_series_individual(h, us, pw)
+                if s_dict:
+                    sel = st.selectbox("Elige Serie:", list(s_dict.keys()))
+                    if st.button("Ver Caps"):
+                        st.dataframe(obtener_episodios_individual(h, us, pw, s_dict[sel]))
+
+# --- PESTAÑA 4: LA SOLUCIÓN FINAL ---
+with tab4:
+    st.header("🛠️ Editor M3U (Compatible Maxplayer)")
+    st.info("Paso 1: Carga tus categorías de TV. Paso 2: Elige las que quieres. Paso 3: Genera el archivo (Pelis y Series se incluyen AUTOMÁTICAMENTE).")
+    
+    m3u_in = st.text_input("Pega tu cuenta completa:", key="tm3u")
+    
+    if m3u_in:
+        url_c = limpiar_url(m3u_in)
+        if url_c:
+            host_m, user_m, pw_m = extraer_credenciales(url_c)
             
-            st.write("---")
-            # --- PANEL DE ESTADÍSTICAS ---
-            c1, c2 = st.columns(2)
-            c1.metric("Canales Detectados", len(live_items))
-            c2.metric("Pelis/Series Detectadas", vod_items_count, help="Estas se incluirán TODAS automáticamente")
-            
-            st.write("---")
-            st.subheader("📺 Selecciona tus Categorías de TV")
-            st.caption("Desmarca lo que NO quieras ver (ej: Países que no te interesan, 24/7, Adultos, etc)")
-            
-            # Obtener grupos únicos
-            grupos_unicos = sorted(list(set([x['group'] for x in live_items])))
-            
-            # Selector de Grupos (Multiselect)
-            # Por defecto seleccionamos TODO para que el usuario quite lo que no quiere
-            grupos_seleccionados = st.multiselect(
-                "Categorías de Canales:",
-                options=grupos_unicos,
-                default=grupos_unicos # Marcar todo por defecto
-            )
-            
-            st.write(f"Has seleccionado **{len(grupos_seleccionados)}** categorías de TV.")
-            
-            if st.button("💾 GENERAR NUEVA LISTA (.m3u)"):
-                # 1. Filtramos los canales según los grupos elegidos
-                canales_finales = [item['full_entry'] for item in live_items if item['group'] in grupos_seleccionados]
+            # PASO 1: Obtener solo los nombres de grupos de TV (Rápido)
+            if st.button("📡 1. Analizar Grupos de Canales"):
+                with st.spinner("Conectando..."):
+                    cats = obtener_categorias_live(host_m, user_m, pw_m)
+                    if cats:
+                        # Guardamos nombres de categorias
+                        st.session_state['nombres_cats'] = sorted([c['category_name'] for c in cats])
+                        st.success("¡Categorías cargadas!")
+                    else:
+                        st.error("No se pudo conectar. Verifica la cuenta.")
+
+            # PASO 2: Selector
+            if 'nombres_cats' in st.session_state:
+                st.write("---")
+                st.subheader("📺 Selecciona las carpetas de TV que quieres VER:")
+                st.caption("Nota: Todas las películas y series se añadirán automáticamente, no necesitas seleccionarlas.")
                 
-                # 2. Unimos: Canales Elegidos + Todo VOD
-                # Cabecera obligatoria
-                contenido_final = "#EXTM3U\r\n"
+                # Multiselect
+                mis_cats = st.multiselect("Carpetas:", st.session_state['nombres_cats'])
                 
-                # Añadir canales
-                for canal in canales_finales:
-                    contenido_final += canal + "\r\n"
+                # PASO 3: Generar
+                if st.button("💾 GENERAR M3U FINAL"):
+                    if not mis_cats:
+                        st.warning("No seleccionaste ninguna carpeta de TV. El archivo solo tendrá Películas y Series.")
                     
-                # Añadir VOD (Pelis/Series)
-                for vod in st.session_state['vod_list']:
-                    contenido_final += vod + "\r\n"
-                
-                # Estadísticas finales
-                peso_mb = len(contenido_final) / (1024 * 1024)
-                st.success(f"✅ Archivo generado con éxito.")
-                st.info(f"📊 Resumen: {len(canales_finales)} Canales + {vod_items_count} VOD/Series.")
-                st.warning(f"⚖️ Peso del archivo: {peso_mb:.2f} MB")
-                
-                st.download_button(
-                    label="⬇️ DESCARGAR LISTA MODIFICADA",
-                    data=contenido_final,
-                    file_name="lista_editada_maxplayer.m3u",
-                    mime="text/plain"
-                )
-                
-                if peso_mb > 15:
-                    st.error("🚨 CUIDADO: El archivo sigue pesando más de 15MB. Maxplayer podría fallar.")
-                    st.write("Sugerencia: Intenta quitar categorías de TV que no uses para bajar el peso.")
+                    with st.spinner("Descargando, filtrando y construyendo archivo (esto toma unos segundos)..."):
+                        # Llamamos a la función inteligente
+                        contenido_final = generar_m3u_filtrado_stream(host_m, user_m, pw_m, mis_cats)
+                        
+                        if contenido_final and len(contenido_final) > 20:
+                            st.success("¡Archivo creado con éxito!")
+                            st.download_button(
+                                label="⬇️ DESCARGAR LISTA .M3U",
+                                data=contenido_final,
+                                file_name="lista_maxplayer_final.m3u",
+                                mime="text/plain"
+                            )
+                        else:
+                            st.error("Hubo un error al generar el archivo o está vacío.")
