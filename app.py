@@ -7,7 +7,7 @@ from urllib.parse import urlparse, parse_qs
 # 1. CONFIGURACIÓN DE PÁGINA
 st.set_page_config(page_title="IPTV Manager", page_icon="📺", layout="wide")
 
-# 2. CAMUFLAJE (OCULTAR MARCAS DE STREAMLIT)
+# 2. CAMUFLAJE (ESTILO PROPIO)
 hide_streamlit_style = """
             <style>
             #MainMenu {visibility: hidden;}
@@ -39,15 +39,10 @@ def extraer_credenciales(url_api):
     except: return None, None, None
 
 def proxificar_imagen(url_imagen):
-    """
-    Truco para que las imágenes HTTP carguen en sitios HTTPS y salten protecciones.
-    Usa el servicio gratuito de caché de imágenes wsrv.nl
-    """
+    """Proxy para imágenes de VOD (Pelis/Series)"""
     if not url_imagen or not url_imagen.startswith('http'):
-        return "https://via.placeholder.com/50?text=No+Img" # Imagen por defecto
-    
-    # Pasamos la URL original a través del proxy seguro
-    return f"https://wsrv.nl/?url={url_imagen}&w=100&h=100&fit=contain&output=webp"
+        return "https://via.placeholder.com/50?text=No+Img"
+    return f"https://wsrv.nl/?url={url_imagen}&w=100&h=150&fit=contain&output=webp"
 
 def verificar_url(url_raw):
     url_final = limpiar_url(url_raw)
@@ -68,7 +63,7 @@ def verificar_url(url_raw):
         }
     except: return {"Estado": "Error"}
 
-# --- FUNCIONES VOD (PELÍCULAS Y SERIES) ---
+# --- FUNCIONES VOD (PELÍCULAS Y SERIES - CON IMÁGENES) ---
 
 def obtener_peliculas(host, user, passw):
     try:
@@ -87,7 +82,6 @@ def obtener_peliculas(host, user, passw):
             link = f"{host}/movie/{user}/{passw}/{item['stream_id']}.{ext}"
             cat_id = item.get('category_id')
             
-            # Aplicamos el truco del proxy a la imagen
             icon_raw = item.get('stream_icon')
             icon_final = proxificar_imagen(icon_raw)
 
@@ -117,8 +111,6 @@ def obtener_lista_series(host, user, passw):
             nombre_carpeta = mapa_carpetas.get(cat_id, "Otras")
             nombre_serie = item['name']
             series_id = item['series_id']
-            
-            # Truco del proxy para la portada de la serie
             cover_raw = item.get('cover')
             cover_final = proxificar_imagen(cover_raw)
             
@@ -151,7 +143,7 @@ def obtener_episodios(host, user, passw, series_id):
         return None
     except: return None
 
-# --- FUNCIONES AUDITORÍA (CANALES) ---
+# --- FUNCIONES AUDITORÍA (CANALES - SIN LOGOS, SOLO TEXTO) ---
 @st.cache_data(ttl=600)
 def mapear_canales_carpetas(host, user, passw):
     try:
@@ -167,15 +159,13 @@ def mapear_canales_carpetas(host, user, passw):
             cat_id = canal.get('category_id')
             nombre_carpeta = mapa_carpetas.get(cat_id, "Sin Categoría / Oculto")
             
-            # TRUCO PROXY PARA LOGOS DE CANALES
-            logo_raw = canal.get('stream_icon')
-            logo_final = proxificar_imagen(logo_raw)
+            # Usamos 'num' si existe (es el número de canal ordenado), si no, usamos el stream_id
+            numero_canal = canal.get('num', canal.get('stream_id'))
 
             lista_final.append({
-                "Logo": logo_final,
+                "N°": numero_canal,  # Nueva Columna solicitada
                 "Nombre del Canal": canal.get('name'),
-                "📂 Carpeta": nombre_carpeta,
-                "ID Canal": canal.get('stream_id')
+                "📂 Carpeta": nombre_carpeta
             })
             
         return pd.DataFrame(lista_final)
@@ -227,7 +217,6 @@ with tab3:
                     filt = st.text_input("Filtrar Título:", key="fp")
                     if filt: df = df[df['Título'].str.contains(filt, case=False, na=False)]
                     
-                    # AQUÍ SE CONFIGURA LA COLUMNA DE IMAGEN
                     st.dataframe(
                         df, 
                         use_container_width=True, 
@@ -254,10 +243,9 @@ with tab3:
 
                     if lista_nombres:
                         sel = st.selectbox("Elige la Serie:", lista_nombres)
-                        
                         datos_serie = series_data[sel]
                         sid = datos_serie['id']
-                        cover_url = datos_serie.get('cover') # URL proxificada
+                        cover_url = datos_serie.get('cover')
                         
                         c_img, c_dat = st.columns([1, 4])
                         with c_img:
@@ -277,9 +265,9 @@ with tab3:
                         del st.session_state['ls']
                         st.rerun()
 
-# --- PESTAÑA 4 ---
+# --- PESTAÑA 4: CANALES (LIMPIA, SOLO NÚMERO Y NOMBRE) ---
 with tab4:
-    st.header("Auditoría de Canales")
+    st.header("🔎 Ubicador de Canales")
     link_search = st.text_input("Pega tu cuenta:", key="t4_input")
     
     if link_search:
@@ -288,8 +276,8 @@ with tab4:
             host, user, pw = extraer_credenciales(url_c)
             
             if 'df_audit' not in st.session_state:
-                if st.button("📡 Cargar Canales"):
-                    with st.spinner("Descargando logos y datos..."):
+                if st.button("📡 Analizar Canales"):
+                    with st.spinner("Descargando lista..."):
                         df = mapear_canales_carpetas(host, user, pw)
                         if df is not None:
                             st.session_state['df_audit'] = df
@@ -298,20 +286,20 @@ with tab4:
 
             if 'df_audit' in st.session_state:
                 df = st.session_state['df_audit']
-                busqueda = st.text_input("🔍 Nombre del Canal:", placeholder="Escribe aquí...")
+                busqueda = st.text_input("🔍 Buscar Canal:", placeholder="Escribe aquí el nombre...")
                 
                 if busqueda:
                     resultados = df[df['Nombre del Canal'].str.contains(busqueda, case=False, na=False)]
                     if not resultados.empty:
-                        st.success(f"Resultados: {len(resultados)}")
+                        st.success(f"Encontrados: {len(resultados)}")
                         
-                        # TABLA CON LOGOS VISIBLES
+                        # TABLA LIMPIA: NUMERO, NOMBRE, CARPETA
                         st.dataframe(
                             resultados,
                             use_container_width=True,
                             hide_index=True,
                             column_config={
-                                "Logo": st.column_config.ImageColumn("Logo", width="small"),
+                                "N°": st.column_config.NumberColumn("Canal #", format="%d"),
                                 "Nombre del Canal": st.column_config.TextColumn("Nombre"),
                                 "📂 Carpeta": st.column_config.TextColumn("Carpeta")
                             }
