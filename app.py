@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import requests
 import pandas as pd
 from datetime import datetime
@@ -7,7 +8,7 @@ from urllib.parse import urlparse, parse_qs
 # CONFIGURACIÓN
 st.set_page_config(page_title="IPTV Tool Master", page_icon="📺", layout="wide")
 st.title("📺 IPTV Tool Web")
-st.markdown("Herramientas: Verificador + Buscador VOD + **Auditoría con Reproductor**.")
+st.markdown("Herramientas: Verificador + Buscador VOD + **Auditoría con Reproductor Web**.")
 
 # --- FUNCIONES DE UTILIDAD ---
 
@@ -105,20 +106,61 @@ def obtener_mapa_canales(host, user, passw):
             nombre_carpeta = mapa_carpetas.get(cat_id, "Sin Categoría / Oculto")
             stream_id = canal.get('stream_id')
             
-            # Guardamos ambos links: TS (para descarga) y M3U8 (para reproductor web)
-            link_ts = f"{host}/live/{user}/{passw}/{stream_id}.ts"
+            # TRUCO: Forzamos extensión .m3u8 para el navegador
             link_m3u8 = f"{host}/live/{user}/{passw}/{stream_id}.m3u8"
+            link_ts = f"{host}/live/{user}/{passw}/{stream_id}.ts"
             
             lista_final.append({
                 "Nombre del Canal": canal.get('name'),
                 "📂 Carpeta (Ubicación)": nombre_carpeta,
                 "ID": stream_id,
-                "Link TS": link_ts,
-                "Link M3U8": link_m3u8
+                "Link M3U8": link_m3u8,
+                "Link TS": link_ts
             })
             
         return pd.DataFrame(lista_final)
     except: return None
+
+def reproductor_hls(url_stream):
+    """
+    Crea un reproductor HTML5 con hls.js inyectado.
+    Esto permite reproducir streams IPTV en navegadores modernos.
+    """
+    html_code = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <style>
+            body {{ margin: 0; background-color: #000; display: flex; justify-content: center; align-items: center; height: 350px; }}
+            video {{ width: 100%; height: 100%; max-height: 350px; }}
+        </style>
+        <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    </head>
+    <body>
+        <video id="video" controls autoplay></video>
+        <script>
+            var video = document.getElementById('video');
+            var videoSrc = "{url_stream}";
+            
+            if (Hls.isSupported()) {{
+                var hls = new Hls();
+                hls.loadSource(videoSrc);
+                hls.attachMedia(video);
+                hls.on(Hls.Events.MANIFEST_PARSED, function() {{
+                    video.play();
+                }});
+            }}
+            else if (video.canPlayType('application/vnd.apple.mpegurl')) {{
+                video.src = videoSrc;
+                video.addEventListener('loadedmetadata', function() {{
+                    video.play();
+                }});
+            }}
+        </script>
+    </body>
+    </html>
+    """
+    components.html(html_code, height=350)
 
 # --- INTERFAZ ---
 
@@ -170,10 +212,10 @@ with tab3:
                     if st.button("Ver Caps"):
                         st.dataframe(obtener_episodios(h, u_c, p_c, st.session_state['ls'][sel]), use_container_width=True)
 
-# --- PESTAÑA 4 MEJORADA CON REPRODUCTOR ---
+# --- PESTAÑA 4 CON REPRODUCTOR JS ---
 with tab4:
     st.header("🔎 Buscador y Probador de Canales")
-    st.info("Escribe para buscar. Selecciona en la lista desplegable para **REPRODUCIR**.")
+    st.info("Ahora usa un reproductor compatible con navegadores (HLS).")
     
     link_search = st.text_input("Pega tu cuenta:", key="t4_input")
     
@@ -201,7 +243,6 @@ with tab4:
                 if busqueda:
                     resultados = df[df['Nombre del Canal'].str.contains(busqueda, case=False, na=False)]
                 
-                # Mostramos tabla de resultados (solo info)
                 st.caption(f"Se encontraron {len(resultados)} canales.")
                 st.dataframe(
                     resultados[['Nombre del Canal', '📂 Carpeta (Ubicación)']],
@@ -214,36 +255,25 @@ with tab4:
                 # 2. REPRODUCTOR / PROBADOR
                 st.subheader("▶️ Probador de Señal")
                 
-                # Llenamos el selectbox con los resultados de la búsqueda de arriba
                 lista_nombres = resultados['Nombre del Canal'].tolist()
                 
                 if lista_nombres:
-                    seleccion = st.selectbox("📺 Selecciona un canal de la lista de arriba para probar:", lista_nombres)
+                    seleccion = st.selectbox("📺 Selecciona un canal para probar:", lista_nombres)
                     
                     if seleccion:
-                        # Buscamos los datos del canal seleccionado
                         row = df[df['Nombre del Canal'] == seleccion].iloc[0]
-                        link_ts = row['Link TS']
                         link_m3u8 = row['Link M3U8']
                         carpeta = row['📂 Carpeta (Ubicación)']
                         
-                        st.success(f"Seleccionado: **{seleccion}** | Ubicación: **{carpeta}**")
+                        st.success(f"Probando: **{seleccion}** ({carpeta})")
                         
-                        col_vid, col_info = st.columns([2, 1])
+                        # INVOCAMOS AL REPRODUCTOR ESPECIAL
+                        reproductor_hls(link_m3u8)
                         
-                        with col_vid:
-                            st.write("**Reproductor Web (M3U8):**")
-                            # Intentamos reproducir usando el formato HLS (.m3u8) que es más compatible
-                            st.video(link_m3u8)
-                            st.caption("Nota: Si sale error o pantalla negra, es porque el navegador no soporta el formato de este canal específico.")
-                        
-                        with col_info:
-                            st.write("**Datos Técnicos:**")
-                            st.text_input("Enlace .TS (Para VLC):", link_ts)
-                            st.info("Si el reproductor web falla, copia el enlace de arriba y pégalo en VLC Player.")
-
+                        st.caption(f"URL: {link_m3u8}")
+                        st.warning("Nota: Si aún así no carga, es posible que el navegador esté bloqueando contenido 'No Seguro' (http) dentro de una web segura.")
                 else:
-                    st.warning("No hay canales para mostrar con ese filtro.")
+                    st.warning("No hay canales para mostrar.")
 
                 st.write("---")
                 if st.button("🔄 Nueva Carga"):
