@@ -6,9 +6,9 @@ from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 
 # CONFIGURACIÓN
-st.set_page_config(page_title="IPTV Tool Master", page_icon="📺", layout="wide")
+st.set_page_config(page_title="IPTV Tool Clappr", page_icon="📺", layout="wide")
 st.title("📺 IPTV Tool Web")
-st.markdown("Herramientas: Verificador + Buscador VOD + **Auditoría con Reproductor Web**.")
+st.markdown("Herramientas: Verificador + Buscador VOD + **Auditoría con Clappr**.")
 
 # --- FUNCIONES DE UTILIDAD ---
 
@@ -106,7 +106,7 @@ def obtener_mapa_canales(host, user, passw):
             nombre_carpeta = mapa_carpetas.get(cat_id, "Sin Categoría / Oculto")
             stream_id = canal.get('stream_id')
             
-            # TRUCO: Forzamos extensión .m3u8 para el navegador
+            # Generamos link M3U8 para Clappr
             link_m3u8 = f"{host}/live/{user}/{passw}/{stream_id}.m3u8"
             link_ts = f"{host}/live/{user}/{passw}/{stream_id}.ts"
             
@@ -121,46 +121,40 @@ def obtener_mapa_canales(host, user, passw):
         return pd.DataFrame(lista_final)
     except: return None
 
-def reproductor_hls(url_stream):
+# --- EL REPRODUCTOR CLAPPR (ESTILO FUTBOL LIBRE) ---
+def reproductor_clappr(url_stream):
     """
-    Crea un reproductor HTML5 con hls.js inyectado.
-    Esto permite reproducir streams IPTV en navegadores modernos.
+    Implementa Clappr Player, el mismo motor que usan páginas como FutbolLibre.
     """
     html_code = f"""
     <!DOCTYPE html>
     <html>
     <head>
+        <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/clappr@latest/dist/clappr.min.js"></script>
         <style>
-            body {{ margin: 0; background-color: #000; display: flex; justify-content: center; align-items: center; height: 350px; }}
-            video {{ width: 100%; height: 100%; max-height: 350px; }}
+            body {{ margin: 0; background-color: black; display: flex; justify-content: center; align-items: center; height: 400px; }}
+            #player {{ width: 100%; height: 100%; }}
         </style>
-        <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     </head>
     <body>
-        <video id="video" controls autoplay></video>
+        <div id="player"></div>
         <script>
-            var video = document.getElementById('video');
-            var videoSrc = "{url_stream}";
-            
-            if (Hls.isSupported()) {{
-                var hls = new Hls();
-                hls.loadSource(videoSrc);
-                hls.attachMedia(video);
-                hls.on(Hls.Events.MANIFEST_PARSED, function() {{
-                    video.play();
-                }});
-            }}
-            else if (video.canPlayType('application/vnd.apple.mpegurl')) {{
-                video.src = videoSrc;
-                video.addEventListener('loadedmetadata', function() {{
-                    video.play();
-                }});
-            }}
+            var player = new Clappr.Player({{
+                source: "{url_stream}",
+                parentId: "#player",
+                width: '100%',
+                height: '100%',
+                autoPlay: true,
+                playback: {{
+                    playInline: true,
+                    recycleVideo: true,
+                }}
+            }});
         </script>
     </body>
     </html>
     """
-    components.html(html_code, height=350)
+    components.html(html_code, height=400)
 
 # --- INTERFAZ ---
 
@@ -212,10 +206,10 @@ with tab3:
                     if st.button("Ver Caps"):
                         st.dataframe(obtener_episodios(h, u_c, p_c, st.session_state['ls'][sel]), use_container_width=True)
 
-# --- PESTAÑA 4 CON REPRODUCTOR JS ---
+# --- PESTAÑA 4 CON CLAPPR ---
 with tab4:
-    st.header("🔎 Buscador y Probador de Canales")
-    st.info("Ahora usa un reproductor compatible con navegadores (HLS).")
+    st.header("🔎 Buscador de Canales (con Clappr)")
+    st.info("Usa el motor de reproducción Clappr (el mismo de las webs de fútbol).")
     
     link_search = st.text_input("Pega tu cuenta:", key="t4_input")
     
@@ -226,7 +220,7 @@ with tab4:
             
             if 'df_canales' not in st.session_state:
                 if st.button("📡 Cargar Lista de Canales"):
-                    with st.spinner("Mapeando carpetas y canales..."):
+                    with st.spinner("Analizando lista..."):
                         df = obtener_mapa_canales(host, user, pw)
                         if df is not None:
                             st.session_state['df_canales'] = df
@@ -237,13 +231,13 @@ with tab4:
                 df = st.session_state['df_canales']
                 
                 # 1. BUSCADOR
-                busqueda = st.text_input("🔍 Filtro Rápido (Nombre del Canal):", placeholder="Ej: Deportes, Cine, Kids...")
+                busqueda = st.text_input("🔍 Buscar Canal (Ej: ESPN, Peru...):", placeholder="Escribe aquí...")
                 
                 resultados = df
                 if busqueda:
                     resultados = df[df['Nombre del Canal'].str.contains(busqueda, case=False, na=False)]
                 
-                st.caption(f"Se encontraron {len(resultados)} canales.")
+                st.caption(f"Encontrados: {len(resultados)}")
                 st.dataframe(
                     resultados[['Nombre del Canal', '📂 Carpeta (Ubicación)']],
                     use_container_width=True,
@@ -252,28 +246,27 @@ with tab4:
                 
                 st.write("---")
                 
-                # 2. REPRODUCTOR / PROBADOR
-                st.subheader("▶️ Probador de Señal")
+                # 2. REPRODUCTOR CLAPPR
+                st.subheader("▶️ Reproductor en Vivo")
                 
                 lista_nombres = resultados['Nombre del Canal'].tolist()
                 
                 if lista_nombres:
-                    seleccion = st.selectbox("📺 Selecciona un canal para probar:", lista_nombres)
+                    seleccion = st.selectbox("📺 Selecciona para reproducir:", lista_nombres)
                     
                     if seleccion:
                         row = df[df['Nombre del Canal'] == seleccion].iloc[0]
                         link_m3u8 = row['Link M3U8']
                         carpeta = row['📂 Carpeta (Ubicación)']
                         
-                        st.success(f"Probando: **{seleccion}** ({carpeta})")
+                        st.success(f"Cargando: **{seleccion}** | {carpeta}")
                         
-                        # INVOCAMOS AL REPRODUCTOR ESPECIAL
-                        reproductor_hls(link_m3u8)
+                        # LLAMADA A CLAPPR
+                        reproductor_clappr(link_m3u8)
                         
-                        st.caption(f"URL: {link_m3u8}")
-                        st.warning("Nota: Si aún así no carga, es posible que el navegador esté bloqueando contenido 'No Seguro' (http) dentro de una web segura.")
+                        st.info("⚠️ Si no carga: Dale clic al candado 🔒 en la barra de direcciones del navegador y selecciona 'Configuración del sitio' -> 'Contenido inseguro' -> 'Permitir'.")
                 else:
-                    st.warning("No hay canales para mostrar.")
+                    st.warning("No hay canales en la lista actual.")
 
                 st.write("---")
                 if st.button("🔄 Nueva Carga"):
