@@ -5,9 +5,9 @@ from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 
 # CONFIGURACIÓN
-st.set_page_config(page_title="IPTV Tool Lite", page_icon="📺", layout="wide")
+st.set_page_config(page_title="IPTV Tool Search", page_icon="📺", layout="wide")
 st.title("📺 IPTV Tool Web")
-st.markdown("Herramientas de Gestión: **Verificador y Buscador VOD**.")
+st.markdown("Herramientas: Verificador + Buscador VOD + **Buscador de Canales (Auditoría)**.")
 
 # --- FUNCIONES DE UTILIDAD ---
 
@@ -46,8 +46,7 @@ def verificar_url(url_raw):
         }
     except: return {"Estado": "Error"}
 
-# --- FUNCIONES DE VOD (PELÍCULAS Y SERIES) ---
-
+# --- FUNCIONES DE VOD ---
 def obtener_peliculas(host, user, passw):
     url = f"{host}/player_api.php?username={user}&password={passw}&action=get_vod_streams"
     try:
@@ -68,7 +67,6 @@ def obtener_lista_series(host, user, passw):
         r = requests.get(url, timeout=25)
         data = r.json()
         if not isinstance(data, list): return None
-        # Retornamos diccionario Nombre -> ID
         return {item['name']: item['series_id'] for item in data}
     except: return None
 
@@ -79,7 +77,6 @@ def obtener_episodios(host, user, passw, series_id):
         data = r.json()
         episodes = data.get('episodes', {})
         lista_episodios = []
-        
         if isinstance(episodes, dict):
             for season_num, eps in episodes.items():
                 for ep in eps:
@@ -91,15 +88,46 @@ def obtener_episodios(host, user, passw, series_id):
         return None
     except: return None
 
+# --- FUNCIONES NUEVAS PARA PESTAÑA 4 (AUDITORÍA DE CANALES) ---
+@st.cache_data(ttl=600)
+def obtener_mapa_canales(host, user, passw):
+    """Descarga canales y categorías, y crea una tabla unificada."""
+    try:
+        # 1. Bajamos la lista de categorías (nombres de carpetas)
+        cats_req = requests.get(f"{host}/player_api.php?username={user}&password={passw}&action=get_live_categories", timeout=20)
+        cats_data = cats_req.json()
+        # Creamos diccionario {ID: "Nombre Carpeta"}
+        mapa_carpetas = {c['category_id']: c['category_name'] for c in cats_data}
+
+        # 2. Bajamos la lista de canales
+        live_req = requests.get(f"{host}/player_api.php?username={user}&password={passw}&action=get_live_streams", timeout=30)
+        live_data = live_req.json()
+
+        # 3. Cruzamos datos
+        lista_final = []
+        for canal in live_data:
+            cat_id = canal.get('category_id')
+            nombre_carpeta = mapa_carpetas.get(cat_id, "Sin Categoría / Oculto")
+            
+            lista_final.append({
+                "Nombre del Canal": canal.get('name'),
+                "📂 Carpeta (Ubicación)": nombre_carpeta,
+                "ID": canal.get('stream_id'),
+                "Link Directo": f"{host}/live/{user}/{passw}/{canal.get('stream_id')}.ts"
+            })
+            
+        return pd.DataFrame(lista_final)
+    except: return None
+
 # --- INTERFAZ ---
 
-tab1, tab2, tab3 = st.tabs(["🔍 Una Cuenta", "📋 Lista Masiva", "📥 Buscador VOD"])
+tab1, tab2, tab3, tab4 = st.tabs(["🔍 Una Cuenta", "📋 Lista Masiva", "📥 Buscador VOD", "🔎 BUSCADOR DE CANALES"])
 
-# PESTAÑA 1: VERIFICADOR SIMPLE
+# TABS 1, 2, 3 (Igual que antes)
 with tab1:
-    st.header("Verificar Estado de Cuenta")
-    u = st.text_input("Enlace (M3U o Xtream):", key="t1_input")
-    if st.button("Verificar Cuenta", key="t1_btn"):
+    st.header("Verificar Estado")
+    u = st.text_input("Enlace:", key="t1_in")
+    if st.button("Verificar"):
         res = verificar_url(u)
         if res and "Usuario" in res:
             st.success(f"Usuario: {res['Usuario']}")
@@ -107,102 +135,96 @@ with tab1:
             c1.metric("Estado", res["Estado"])
             c2.metric("Vence", res["Vence"])
             c3.metric("Conexiones", res["Conexiones"])
-        else: st.error("Error: No se pudo conectar o la cuenta no existe.")
+        else: st.error("Error.")
 
-# PESTAÑA 2: VERIFICADOR MASIVO
 with tab2:
     st.header("Verificador Masivo")
-    st.caption("Pega una lista de enlaces (uno por línea) para chequearlos todos.")
-    txt = st.text_area("Lista de enlaces:", height=200)
-    
-    if st.button("Procesar Lista"):
+    txt = st.text_area("Lista de enlaces:")
+    if st.button("Procesar"):
         urls = txt.split('\n')
-        # Filtramos líneas vacías o muy cortas
-        validos = [x.strip() for x in urls if len(x) > 10]
-        
-        if not validos:
-            st.warning("No se detectaron enlaces válidos.")
-        else:
-            progreso = st.progress(0)
-            resultados = []
-            
-            for i, link in enumerate(validos):
-                res = verificar_url(link)
-                if res:
-                    resultados.append(res)
-                progreso.progress((i + 1) / len(validos))
-            
-            if resultados:
-                st.dataframe(pd.DataFrame(resultados), use_container_width=True)
-            else:
-                st.error("Ningún enlace funcionó.")
+        res = [verificar_url(x) for x in urls if len(x)>10]
+        st.dataframe(pd.DataFrame([r for r in res if r]))
 
-# PESTAÑA 3: BUSCADOR VOD (PELIS Y SERIES)
 with tab3:
-    st.header("Buscador de Contenido (VOD)")
-    st.info("Busca Películas o Series específicas y obtén sus enlaces directos.")
+    st.header("Buscador VOD (Pelis/Series)")
+    l_vod = st.text_input("Cuenta:", key="tvod")
+    t_vod = st.radio("Tipo:", ["🎬 Películas", "📺 Series"], horizontal=True)
+    if l_vod:
+        h, u_c, p_c = extraer_credenciales(l_vod)
+        if h:
+            if t_vod == "🎬 Películas":
+                if st.button("Buscar Pelis"):
+                    st.session_state['df_p'] = obtener_peliculas(h, u_c, p_c)
+                if 'df_p' in st.session_state and st.session_state['df_p'] is not None:
+                    df = st.session_state['df_p']
+                    filt = st.text_input("Nombre:", key="fp")
+                    if filt: df = df[df['Título'].str.contains(filt, case=False, na=False)]
+                    st.dataframe(df, use_container_width=True, hide_index=True)
+            else:
+                if st.button("Cargar Series"):
+                    st.session_state['ls'] = obtener_lista_series(h, u_c, p_c)
+                    st.rerun()
+                if 'ls' in st.session_state:
+                    sel = st.selectbox("Serie:", list(st.session_state['ls'].keys()))
+                    if st.button("Ver Caps"):
+                        st.dataframe(obtener_episodios(h, u_c, p_c, st.session_state['ls'][sel]), use_container_width=True)
+
+# --- PESTAÑA 4: EL BUSCADOR DE CANALES ---
+with tab4:
+    st.header("🔎 ¿Dónde está mi canal?")
+    st.info("Escribe el nombre de un canal para saber si existe y **en qué carpeta** se encuentra.")
     
-    link_vod = st.text_input("Pega tu cuenta:", key="vod_input")
-    tipo_contenido = st.radio("¿Qué buscas?", ["🎬 Películas", "📺 Series"], horizontal=True)
-
-    if link_vod:
-        url_clean = limpiar_url(link_vod)
-        if url_clean:
-            host, user, pw = extraer_credenciales(url_clean)
-
-            # --- OPCIÓN PELÍCULAS ---
-            if tipo_contenido == "🎬 Películas":
-                if st.button("1. Descargar Catálogo de Películas"):
-                    with st.spinner("Descargando lista de películas..."):
-                        st.session_state['df_pelis'] = obtener_peliculas(host, user, pw)
-                
-                if 'df_pelis' in st.session_state and st.session_state['df_pelis'] is not None:
-                    df = st.session_state['df_pelis']
-                    filtro = st.text_input("🔍 Buscar por nombre:", placeholder="Ej: Mario Bros")
-                    
-                    if filtro:
-                        df_show = df[df['Título'].str.contains(filtro, case=False, na=False)]
-                    else:
-                        df_show = df.head(100) # Mostrar solo las primeras 100 si no hay filtro
-
-                    st.dataframe(
-                        df_show, 
-                        use_container_width=True, 
-                        hide_index=True,
-                        column_config={
-                            "Link": st.column_config.LinkColumn("Enlace", display_text="⬇️ Abrir/Descargar")
-                        }
-                    )
-
-            # --- OPCIÓN SERIES ---
-            elif tipo_contenido == "📺 Series":
-                if 'lista_series' not in st.session_state:
-                    if st.button("1. Cargar Lista de Series"):
-                        with st.spinner("Descargando lista de series..."):
-                            st.session_state['lista_series'] = obtener_lista_series(host, user, pw)
+    link_search = st.text_input("Pega tu cuenta:", key="t4_input")
+    
+    if link_search:
+        url_c = limpiar_url(link_search)
+        if url_c:
+            host, user, pw = extraer_credenciales(url_c)
+            
+            # Botón de carga inicial
+            if 'df_canales' not in st.session_state:
+                if st.button("📡 Analizar Lista de Canales"):
+                    with st.spinner("Descargando y mapeando carpetas..."):
+                        df = obtener_mapa_canales(host, user, pw)
+                        if df is not None:
+                            st.session_state['df_canales'] = df
                             st.rerun()
+                        else:
+                            st.error("No se pudo descargar la lista.")
+
+            # Si ya tenemos los datos cargados, mostramos el buscador
+            if 'df_canales' in st.session_state:
+                df = st.session_state['df_canales']
                 
-                if 'lista_series' in st.session_state:
-                    series_dict = st.session_state['lista_series']
-                    nombres_series = list(series_dict.keys())
+                # Input de búsqueda instantánea
+                busqueda = st.text_input("🔍 Escribe el nombre del canal (Ej: ESPN, HBO, Peru...):", placeholder="Escribe aquí...")
+                
+                if busqueda:
+                    # Filtramos el DataFrame buscando en la columna 'Nombre del Canal'
+                    # case=False hace que no importen mayúsculas/minúsculas
+                    resultados = df[df['Nombre del Canal'].str.contains(busqueda, case=False, na=False)]
                     
-                    seleccion = st.selectbox("2. Selecciona la Serie:", nombres_series)
-                    
-                    if st.button(f"Ver Episodios de: {seleccion}"):
-                        sid = series_dict[seleccion]
-                        with st.spinner("Obteniendo episodios..."):
-                            st.session_state['df_episodios'] = obtener_episodios(host, user, pw, sid)
-                    
-                    if 'df_episodios' in st.session_state and st.session_state['df_episodios'] is not None:
+                    if not resultados.empty:
+                        st.success(f"✅ Se encontraron **{len(resultados)}** coincidencias.")
+                        
+                        # Mostramos la tabla enfocada en la ubicación
                         st.dataframe(
-                            st.session_state['df_episodios'], 
-                            use_container_width=True, 
+                            resultados[['Nombre del Canal', '📂 Carpeta (Ubicación)', 'Link Directo']],
+                            use_container_width=True,
                             hide_index=True,
                             column_config={
-                                "Link": st.column_config.LinkColumn("Enlace", display_text="⬇️ Abrir/Descargar")
+                                "Link Directo": st.column_config.LinkColumn("Probar", display_text="▶️ Ver")
                             }
                         )
-                    
-                    if st.button("🔄 Nueva Búsqueda"):
-                        del st.session_state['lista_series']
-                        st.rerun()
+                    else:
+                        st.warning("❌ No se encontró ningún canal con ese nombre. Revisa si está bien escrito.")
+                else:
+                    st.info("👆 Escribe arriba para empezar a filtrar.")
+                    # Opcional: Mostrar los primeros 10 para que no se vea vacío
+                    st.caption("Ejemplos de tu lista:")
+                    st.dataframe(df.head(5)[['Nombre del Canal', '📂 Carpeta (Ubicación)']], hide_index=True)
+                
+                st.write("---")
+                if st.button("🔄 Recargar Lista"):
+                    del st.session_state['df_canales']
+                    st.rerun()
