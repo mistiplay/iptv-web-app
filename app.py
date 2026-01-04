@@ -4,10 +4,21 @@ import pandas as pd
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 
-# CONFIGURACIÓN VISUAL
-st.set_page_config(page_title="IPTV Manager Visual", page_icon="📺", layout="wide")
+# 1. CONFIGURACIÓN DE PÁGINA
+st.set_page_config(page_title="IPTV Manager", page_icon="📺", layout="wide")
+
+# 2. CAMUFLAJE (OCULTAR MARCAS DE STREAMLIT)
+hide_streamlit_style = """
+            <style>
+            #MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+            header {visibility: hidden;}
+            .stDeployButton {display:none;}
+            </style>
+            """
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+
 st.title("📺 IPTV Manager Tool")
-st.markdown("Herramienta de Gestión: Verificación, **VOD Visual** y Auditoría.")
 
 # --- FUNCIONES DE UTILIDAD ---
 
@@ -26,6 +37,17 @@ def extraer_credenciales(url_api):
         if not username or not password: return None, None, None
         return host, username, password
     except: return None, None, None
+
+def proxificar_imagen(url_imagen):
+    """
+    Truco para que las imágenes HTTP carguen en sitios HTTPS y salten protecciones.
+    Usa el servicio gratuito de caché de imágenes wsrv.nl
+    """
+    if not url_imagen or not url_imagen.startswith('http'):
+        return "https://via.placeholder.com/50?text=No+Img" # Imagen por defecto
+    
+    # Pasamos la URL original a través del proxy seguro
+    return f"https://wsrv.nl/?url={url_imagen}&w=100&h=100&fit=contain&output=webp"
 
 def verificar_url(url_raw):
     url_final = limpiar_url(url_raw)
@@ -46,16 +68,14 @@ def verificar_url(url_raw):
         }
     except: return {"Estado": "Error"}
 
-# --- FUNCIONES VOD CON IMÁGENES ---
+# --- FUNCIONES VOD (PELÍCULAS Y SERIES) ---
 
 def obtener_peliculas(host, user, passw):
     try:
-        # Categorías
         url_cats = f"{host}/player_api.php?username={user}&password={passw}&action=get_vod_categories"
         cats_data = requests.get(url_cats, timeout=20).json()
         mapa_carpetas = {c['category_id']: c['category_name'] for c in cats_data}
 
-        # Películas
         url_vod = f"{host}/player_api.php?username={user}&password={passw}&action=get_vod_streams"
         data = requests.get(url_vod, timeout=30).json()
         
@@ -67,13 +87,12 @@ def obtener_peliculas(host, user, passw):
             link = f"{host}/movie/{user}/{passw}/{item['stream_id']}.{ext}"
             cat_id = item.get('category_id')
             
-            # IMAGEN
-            icon = item.get('stream_icon')
-            if not icon or not icon.startswith('http'): 
-                icon = "https://via.placeholder.com/150?text=No+Img" # Imagen por defecto si no tiene
+            # Aplicamos el truco del proxy a la imagen
+            icon_raw = item.get('stream_icon')
+            icon_final = proxificar_imagen(icon_raw)
 
             lista.append({
-                "Portada": icon,
+                "Portada": icon_final,
                 "Título": item['name'],
                 "📂 Carpeta": mapa_carpetas.get(cat_id, "Otras"),
                 "Link": link
@@ -92,23 +111,22 @@ def obtener_lista_series(host, user, passw):
         
         if not isinstance(data, list): return None
         
-        # Guardamos más datos en el diccionario: ID y PORTADA
         diccionario_series = {}
         for item in data:
             cat_id = item.get('category_id')
             nombre_carpeta = mapa_carpetas.get(cat_id, "Otras")
             nombre_serie = item['name']
             series_id = item['series_id']
-            cover = item.get('cover') # La imagen de la serie
+            
+            # Truco del proxy para la portada de la serie
+            cover_raw = item.get('cover')
+            cover_final = proxificar_imagen(cover_raw)
             
             etiqueta = f"{nombre_serie}  | 📂 {nombre_carpeta}"
-            
-            # Guardamos un objeto con todo lo necesario
             diccionario_series[etiqueta] = {
                 "id": series_id,
-                "cover": cover
+                "cover": cover_final
             }
-            
         return diccionario_series
     except: return None
 
@@ -124,9 +142,6 @@ def obtener_episodios(host, user, passw, series_id):
                 for ep in eps:
                     ext = ep.get('container_extension', 'mp4')
                     link = f"{host}/series/{user}/{passw}/{ep['id']}.{ext}"
-                    # Intentamos buscar imagen del episodio, si no hay, ponemos nada
-                    img_ep = ep.get('info', {}).get('movie_image') 
-                    
                     nombre_cap = f"T{season_num} E{ep['episode_num']} - {ep['title']}"
                     lista_episodios.append({
                         "Episodio": nombre_cap, 
@@ -136,7 +151,7 @@ def obtener_episodios(host, user, passw, series_id):
         return None
     except: return None
 
-# --- FUNCIONES AUDITORÍA (CANALES CON LOGOS) ---
+# --- FUNCIONES AUDITORÍA (CANALES) ---
 @st.cache_data(ttl=600)
 def mapear_canales_carpetas(host, user, passw):
     try:
@@ -152,13 +167,12 @@ def mapear_canales_carpetas(host, user, passw):
             cat_id = canal.get('category_id')
             nombre_carpeta = mapa_carpetas.get(cat_id, "Sin Categoría / Oculto")
             
-            # IMAGEN DEL LOGO
-            logo = canal.get('stream_icon')
-            if not logo or not logo.startswith('http'):
-                 logo = "https://via.placeholder.com/50?text=TV"
+            # TRUCO PROXY PARA LOGOS DE CANALES
+            logo_raw = canal.get('stream_icon')
+            logo_final = proxificar_imagen(logo_raw)
 
             lista_final.append({
-                "Logo": logo,
+                "Logo": logo_final,
                 "Nombre del Canal": canal.get('name'),
                 "📂 Carpeta": nombre_carpeta,
                 "ID Canal": canal.get('stream_id')
@@ -173,9 +187,9 @@ tab1, tab2, tab3, tab4 = st.tabs(["🔍 Verificar", "📋 Masivo", "📥 VOD Vis
 
 # --- PESTAÑA 1 ---
 with tab1:
-    st.header("Verificador")
+    st.header("Verificador Individual")
     u = st.text_input("Enlace:", key="t1_in")
-    if st.button("Verificar"):
+    if st.button("Verificar Estado"):
         res = verificar_url(u)
         if res and "Usuario" in res:
             st.success(f"Usuario: {res['Usuario']}")
@@ -183,51 +197,50 @@ with tab1:
             c1.metric("Estado", res["Estado"])
             c2.metric("Vence", res["Vence"])
             c3.metric("Conexiones", res["Conexiones"])
-        else: st.error("Error.")
+        else: st.error("Error: Verifica el enlace.")
 
 # --- PESTAÑA 2 ---
 with tab2:
-    st.header("Masivo")
-    txt = st.text_area("Enlaces:", height=150)
-    if st.button("Procesar"):
+    st.header("Verificador Masivo")
+    txt = st.text_area("Enlaces (uno por línea):", height=150)
+    if st.button("Procesar Lista"):
         urls = txt.split('\n')
         res = [verificar_url(x) for x in urls if len(x)>10]
         st.dataframe(pd.DataFrame([r for r in res if r]), use_container_width=True)
 
-# --- PESTAÑA 3: VOD CON IMÁGENES ---
+# --- PESTAÑA 3 ---
 with tab3:
-    st.header("Descargas VOD (Visual)")
+    st.header("VOD (Películas y Series)")
     l_vod = st.text_input("Cuenta:", key="tvod")
-    t_vod = st.radio("Tipo:", ["🎬 Películas", "📺 Series"], horizontal=True)
+    t_vod = st.radio("Buscar:", ["🎬 Películas", "📺 Series"], horizontal=True)
     
     if l_vod:
         h, u_c, p_c = extraer_credenciales(l_vod)
         if h:
             if t_vod == "🎬 Películas":
                 if st.button("Buscar Películas"):
-                    with st.spinner("Descargando catálogo e imágenes..."):
+                    with st.spinner("Cargando catálogo..."):
                         st.session_state['df_p'] = obtener_peliculas(h, u_c, p_c)
                 
                 if 'df_p' in st.session_state and st.session_state['df_p'] is not None:
                     df = st.session_state['df_p']
-                    filt = st.text_input("Filtrar nombre:", key="fp")
+                    filt = st.text_input("Filtrar Título:", key="fp")
                     if filt: df = df[df['Título'].str.contains(filt, case=False, na=False)]
                     
-                    # CONFIGURACIÓN DE LA TABLA PARA MOSTRAR IMAGENES
+                    # AQUÍ SE CONFIGURA LA COLUMNA DE IMAGEN
                     st.dataframe(
                         df, 
                         use_container_width=True, 
                         hide_index=True,
                         column_config={
-                            "Portada": st.column_config.ImageColumn("Portada", width="small"), # AQUI ESTÁ LA MAGIA
-                            "Link": st.column_config.LinkColumn("Enlace", display_text="⬇️ Bajar"),
+                            "Portada": st.column_config.ImageColumn("Póster", width="small"),
+                            "Link": st.column_config.LinkColumn("Video", display_text="⬇️ Bajar"),
                             "📂 Carpeta": st.column_config.TextColumn("Ubicación")
                         }
                     )
-            
             else: # SERIES
                 if st.button("Cargar Series"):
-                    with st.spinner("Descargando series..."):
+                    with st.spinner("Cargando series..."):
                         st.session_state['ls'] = obtener_lista_series(h, u_c, p_c)
                         st.rerun()
                 
@@ -242,37 +255,31 @@ with tab3:
                     if lista_nombres:
                         sel = st.selectbox("Elige la Serie:", lista_nombres)
                         
-                        # MOSTRAR PORTADA DE LA SERIE SELECCIONADA
                         datos_serie = series_data[sel]
                         sid = datos_serie['id']
-                        cover_url = datos_serie.get('cover')
+                        cover_url = datos_serie.get('cover') # URL proxificada
                         
-                        col_img, col_eps = st.columns([1, 4])
+                        c_img, c_dat = st.columns([1, 4])
+                        with c_img:
+                             st.image(cover_url, caption="Portada", width=150)
                         
-                        with col_img:
-                            if cover_url and cover_url.startswith("http"):
-                                st.image(cover_url, width=150, caption="Carátula")
-                            else:
-                                st.write("📺 Sin imagen")
-
-                        with col_eps:
+                        with c_dat:
                             if st.button(f"Ver Episodios"):
-                                with st.spinner("Buscando..."):
+                                with st.spinner("Buscando capítulos..."):
                                     df_eps = obtener_episodios(h, u_c, p_c, sid)
                                     st.dataframe(
                                         df_eps, 
                                         use_container_width=True, 
                                         hide_index=True,
-                                        column_config={"Link": st.column_config.LinkColumn("Enlace", display_text="⬇️ Bajar")}
+                                        column_config={"Link": st.column_config.LinkColumn("Video", display_text="⬇️ Bajar")}
                                     )
-                    
-                    if st.button("🔄 Nueva Búsqueda"):
+                    if st.button("🔄 Reiniciar"):
                         del st.session_state['ls']
                         st.rerun()
 
-# --- PESTAÑA 4: CANALES CON LOGOS ---
+# --- PESTAÑA 4 ---
 with tab4:
-    st.header("🔎 Ubicador (Con Logos)")
+    st.header("Auditoría de Canales")
     link_search = st.text_input("Pega tu cuenta:", key="t4_input")
     
     if link_search:
@@ -281,30 +288,30 @@ with tab4:
             host, user, pw = extraer_credenciales(url_c)
             
             if 'df_audit' not in st.session_state:
-                if st.button("📡 Analizar Canales"):
+                if st.button("📡 Cargar Canales"):
                     with st.spinner("Descargando logos y datos..."):
                         df = mapear_canales_carpetas(host, user, pw)
                         if df is not None:
                             st.session_state['df_audit'] = df
                             st.rerun()
-                        else: st.error("Error.")
+                        else: st.error("Error al conectar.")
 
             if 'df_audit' in st.session_state:
                 df = st.session_state['df_audit']
-                busqueda = st.text_input("🔍 Buscar Canal:", placeholder="Escribe aquí...")
+                busqueda = st.text_input("🔍 Nombre del Canal:", placeholder="Escribe aquí...")
                 
                 if busqueda:
                     resultados = df[df['Nombre del Canal'].str.contains(busqueda, case=False, na=False)]
                     if not resultados.empty:
-                        st.success(f"Encontrados: {len(resultados)}")
+                        st.success(f"Resultados: {len(resultados)}")
                         
-                        # TABLA VISUAL CON LOGOS
+                        # TABLA CON LOGOS VISIBLES
                         st.dataframe(
                             resultados,
                             use_container_width=True,
                             hide_index=True,
                             column_config={
-                                "Logo": st.column_config.ImageColumn("Logo", width="small"), # AQUI ESTÁ LA MAGIA
+                                "Logo": st.column_config.ImageColumn("Logo", width="small"),
                                 "Nombre del Canal": st.column_config.TextColumn("Nombre"),
                                 "📂 Carpeta": st.column_config.TextColumn("Carpeta")
                             }
@@ -313,6 +320,6 @@ with tab4:
                         st.warning("No encontrado.")
                 
                 st.write("---")
-                if st.button("🔄 Limpiar"):
+                if st.button("🔄 Nueva Búsqueda"):
                     del st.session_state['df_audit']
                     st.rerun()
