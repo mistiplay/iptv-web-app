@@ -6,9 +6,9 @@ from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 
 # CONFIGURACIÓN
-st.set_page_config(page_title="IPTV Tool Clappr", page_icon="📺", layout="wide")
+st.set_page_config(page_title="IPTV Tool Final", page_icon="📺", layout="wide")
 st.title("📺 IPTV Tool Web")
-st.markdown("Herramientas: Verificador + Buscador VOD + **Auditoría con Clappr**.")
+st.markdown("Herramientas: Verificador + Buscador VOD + **Auditoría con Proxy**.")
 
 # --- FUNCIONES DE UTILIDAD ---
 
@@ -106,7 +106,6 @@ def obtener_mapa_canales(host, user, passw):
             nombre_carpeta = mapa_carpetas.get(cat_id, "Sin Categoría / Oculto")
             stream_id = canal.get('stream_id')
             
-            # Generamos link M3U8 para Clappr
             link_m3u8 = f"{host}/live/{user}/{passw}/{stream_id}.m3u8"
             link_ts = f"{host}/live/{user}/{passw}/{stream_id}.ts"
             
@@ -121,11 +120,15 @@ def obtener_mapa_canales(host, user, passw):
         return pd.DataFrame(lista_final)
     except: return None
 
-# --- EL REPRODUCTOR CLAPPR (ESTILO FUTBOL LIBRE) ---
-def reproductor_clappr(url_stream):
-    """
-    Implementa Clappr Player, el mismo motor que usan páginas como FutbolLibre.
-    """
+# --- REPRODUCTOR CLAPPR MEJORADO ---
+def reproductor_clappr(url_stream, usar_proxy=False):
+    
+    # Truco del Proxy: Usamos corsproxy.io para "engañar" al navegador
+    # y convertir la petición HTTP en HTTPS
+    url_final = url_stream
+    if usar_proxy:
+        url_final = f"https://corsproxy.io/?{url_stream}"
+
     html_code = f"""
     <!DOCTYPE html>
     <html>
@@ -140,7 +143,7 @@ def reproductor_clappr(url_stream):
         <div id="player"></div>
         <script>
             var player = new Clappr.Player({{
-                source: "{url_stream}",
+                source: "{url_final}",
                 parentId: "#player",
                 width: '100%',
                 height: '100%',
@@ -148,6 +151,11 @@ def reproductor_clappr(url_stream):
                 playback: {{
                     playInline: true,
                     recycleVideo: true,
+                }},
+                events: {{
+                    onError: function(e) {{
+                        console.log("Error de Clappr:", e);
+                    }}
                 }}
             }});
         </script>
@@ -160,7 +168,7 @@ def reproductor_clappr(url_stream):
 
 tab1, tab2, tab3, tab4 = st.tabs(["🔍 Una Cuenta", "📋 Lista Masiva", "📥 Buscador VOD", "🔎 AUDITOR DE CANALES"])
 
-# TABS 1, 2, 3 (Iguales)
+# TABS 1, 2, 3 (Sin cambios)
 with tab1:
     st.header("Verificar Estado")
     u = st.text_input("Enlace:", key="t1_in")
@@ -206,10 +214,10 @@ with tab3:
                     if st.button("Ver Caps"):
                         st.dataframe(obtener_episodios(h, u_c, p_c, st.session_state['ls'][sel]), use_container_width=True)
 
-# --- PESTAÑA 4 CON CLAPPR ---
+# --- PESTAÑA 4 CON SOLUCIÓN PROXY ---
 with tab4:
-    st.header("🔎 Buscador de Canales (con Clappr)")
-    st.info("Usa el motor de reproducción Clappr (el mismo de las webs de fútbol).")
+    st.header("🔎 Buscador y Reproductor (Solución HTTPS)")
+    st.info("Busca canales. Si no cargan, activa la casilla 'Usar Proxy Web'.")
     
     link_search = st.text_input("Pega tu cuenta:", key="t4_input")
     
@@ -231,7 +239,7 @@ with tab4:
                 df = st.session_state['df_canales']
                 
                 # 1. BUSCADOR
-                busqueda = st.text_input("🔍 Buscar Canal (Ej: ESPN, Peru...):", placeholder="Escribe aquí...")
+                busqueda = st.text_input("🔍 Buscar Canal:", placeholder="Escribe aquí...")
                 
                 resultados = df
                 if busqueda:
@@ -246,27 +254,42 @@ with tab4:
                 
                 st.write("---")
                 
-                # 2. REPRODUCTOR CLAPPR
-                st.subheader("▶️ Reproductor en Vivo")
+                # 2. REPRODUCTOR CON OPCIONES
+                st.subheader("▶️ Reproductor Clappr")
                 
                 lista_nombres = resultados['Nombre del Canal'].tolist()
                 
                 if lista_nombres:
-                    seleccion = st.selectbox("📺 Selecciona para reproducir:", lista_nombres)
+                    seleccion = st.selectbox("📺 Selecciona canal:", lista_nombres)
+                    
+                    # --- LAS OPCIONES MÁGICAS ---
+                    col_opts, col_player = st.columns([1, 3])
+                    
+                    with col_opts:
+                        st.markdown("**Opciones de Carga:**")
+                        # Opción A: Proxy (La que arregla lo de futbol libre)
+                        usar_proxy = st.checkbox("🔄 Usar Proxy Web", value=True, help="Actívalo si la pantalla se queda negra. Usa un puente seguro.")
+                        # Opción B: Forzar HTTPS (Por si el servidor tiene certificado)
+                        forzar_https = st.checkbox("🔒 Forzar HTTPS", value=False, help="Intenta cambiar http por https en el enlace.")
                     
                     if seleccion:
                         row = df[df['Nombre del Canal'] == seleccion].iloc[0]
-                        link_m3u8 = row['Link M3U8']
+                        link_final = row['Link M3U8']
                         carpeta = row['📂 Carpeta (Ubicación)']
                         
-                        st.success(f"Cargando: **{seleccion}** | {carpeta}")
+                        # Aplicar lógica de opciones
+                        if forzar_https:
+                            link_final = link_final.replace("http://", "https://")
                         
-                        # LLAMADA A CLAPPR
-                        reproductor_clappr(link_m3u8)
+                        st.success(f"Reproduciendo: **{seleccion}**")
                         
-                        st.info("⚠️ Si no carga: Dale clic al candado 🔒 en la barra de direcciones del navegador y selecciona 'Configuración del sitio' -> 'Contenido inseguro' -> 'Permitir'.")
+                        # LLAMADA AL PLAYER
+                        with col_player:
+                            reproductor_clappr(link_final, usar_proxy=usar_proxy)
+                            
+                        st.caption(f"Stream URL: {link_final}")
                 else:
-                    st.warning("No hay canales en la lista actual.")
+                    st.warning("No hay canales visibles.")
 
                 st.write("---")
                 if st.button("🔄 Nueva Carga"):
