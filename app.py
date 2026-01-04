@@ -5,9 +5,9 @@ from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 
 # CONFIGURACIÓN
-st.set_page_config(page_title="IPTV Tool Search", page_icon="📺", layout="wide")
+st.set_page_config(page_title="IPTV Tool Master", page_icon="📺", layout="wide")
 st.title("📺 IPTV Tool Web")
-st.markdown("Herramientas: Verificador + Buscador VOD + **Buscador de Canales (Auditoría)**.")
+st.markdown("Herramientas: Verificador + Buscador VOD + **Auditoría con Reproductor**.")
 
 # --- FUNCIONES DE UTILIDAD ---
 
@@ -88,32 +88,33 @@ def obtener_episodios(host, user, passw, series_id):
         return None
     except: return None
 
-# --- FUNCIONES NUEVAS PARA PESTAÑA 4 (AUDITORÍA DE CANALES) ---
+# --- FUNCIONES PESTAÑA 4 ---
 @st.cache_data(ttl=600)
 def obtener_mapa_canales(host, user, passw):
-    """Descarga canales y categorías, y crea una tabla unificada."""
     try:
-        # 1. Bajamos la lista de categorías (nombres de carpetas)
         cats_req = requests.get(f"{host}/player_api.php?username={user}&password={passw}&action=get_live_categories", timeout=20)
         cats_data = cats_req.json()
-        # Creamos diccionario {ID: "Nombre Carpeta"}
         mapa_carpetas = {c['category_id']: c['category_name'] for c in cats_data}
 
-        # 2. Bajamos la lista de canales
         live_req = requests.get(f"{host}/player_api.php?username={user}&password={passw}&action=get_live_streams", timeout=30)
         live_data = live_req.json()
 
-        # 3. Cruzamos datos
         lista_final = []
         for canal in live_data:
             cat_id = canal.get('category_id')
             nombre_carpeta = mapa_carpetas.get(cat_id, "Sin Categoría / Oculto")
+            stream_id = canal.get('stream_id')
+            
+            # Guardamos ambos links: TS (para descarga) y M3U8 (para reproductor web)
+            link_ts = f"{host}/live/{user}/{passw}/{stream_id}.ts"
+            link_m3u8 = f"{host}/live/{user}/{passw}/{stream_id}.m3u8"
             
             lista_final.append({
                 "Nombre del Canal": canal.get('name'),
                 "📂 Carpeta (Ubicación)": nombre_carpeta,
-                "ID": canal.get('stream_id'),
-                "Link Directo": f"{host}/live/{user}/{passw}/{canal.get('stream_id')}.ts"
+                "ID": stream_id,
+                "Link TS": link_ts,
+                "Link M3U8": link_m3u8
             })
             
         return pd.DataFrame(lista_final)
@@ -121,9 +122,9 @@ def obtener_mapa_canales(host, user, passw):
 
 # --- INTERFAZ ---
 
-tab1, tab2, tab3, tab4 = st.tabs(["🔍 Una Cuenta", "📋 Lista Masiva", "📥 Buscador VOD", "🔎 BUSCADOR DE CANALES"])
+tab1, tab2, tab3, tab4 = st.tabs(["🔍 Una Cuenta", "📋 Lista Masiva", "📥 Buscador VOD", "🔎 AUDITOR DE CANALES"])
 
-# TABS 1, 2, 3 (Igual que antes)
+# TABS 1, 2, 3 (Iguales)
 with tab1:
     st.header("Verificar Estado")
     u = st.text_input("Enlace:", key="t1_in")
@@ -169,10 +170,10 @@ with tab3:
                     if st.button("Ver Caps"):
                         st.dataframe(obtener_episodios(h, u_c, p_c, st.session_state['ls'][sel]), use_container_width=True)
 
-# --- PESTAÑA 4: EL BUSCADOR DE CANALES ---
+# --- PESTAÑA 4 MEJORADA CON REPRODUCTOR ---
 with tab4:
-    st.header("🔎 ¿Dónde está mi canal?")
-    st.info("Escribe el nombre de un canal para saber si existe y **en qué carpeta** se encuentra.")
+    st.header("🔎 Buscador y Probador de Canales")
+    st.info("Escribe para buscar. Selecciona en la lista desplegable para **REPRODUCIR**.")
     
     link_search = st.text_input("Pega tu cuenta:", key="t4_input")
     
@@ -181,50 +182,70 @@ with tab4:
         if url_c:
             host, user, pw = extraer_credenciales(url_c)
             
-            # Botón de carga inicial
             if 'df_canales' not in st.session_state:
-                if st.button("📡 Analizar Lista de Canales"):
-                    with st.spinner("Descargando y mapeando carpetas..."):
+                if st.button("📡 Cargar Lista de Canales"):
+                    with st.spinner("Mapeando carpetas y canales..."):
                         df = obtener_mapa_canales(host, user, pw)
                         if df is not None:
                             st.session_state['df_canales'] = df
                             st.rerun()
-                        else:
-                            st.error("No se pudo descargar la lista.")
+                        else: st.error("Error de carga.")
 
-            # Si ya tenemos los datos cargados, mostramos el buscador
             if 'df_canales' in st.session_state:
                 df = st.session_state['df_canales']
                 
-                # Input de búsqueda instantánea
-                busqueda = st.text_input("🔍 Escribe el nombre del canal (Ej: ESPN, HBO, Peru...):", placeholder="Escribe aquí...")
+                # 1. BUSCADOR
+                busqueda = st.text_input("🔍 Filtro Rápido (Nombre del Canal):", placeholder="Ej: Deportes, Cine, Kids...")
                 
+                resultados = df
                 if busqueda:
-                    # Filtramos el DataFrame buscando en la columna 'Nombre del Canal'
-                    # case=False hace que no importen mayúsculas/minúsculas
                     resultados = df[df['Nombre del Canal'].str.contains(busqueda, case=False, na=False)]
-                    
-                    if not resultados.empty:
-                        st.success(f"✅ Se encontraron **{len(resultados)}** coincidencias.")
-                        
-                        # Mostramos la tabla enfocada en la ubicación
-                        st.dataframe(
-                            resultados[['Nombre del Canal', '📂 Carpeta (Ubicación)', 'Link Directo']],
-                            use_container_width=True,
-                            hide_index=True,
-                            column_config={
-                                "Link Directo": st.column_config.LinkColumn("Probar", display_text="▶️ Ver")
-                            }
-                        )
-                    else:
-                        st.warning("❌ No se encontró ningún canal con ese nombre. Revisa si está bien escrito.")
-                else:
-                    st.info("👆 Escribe arriba para empezar a filtrar.")
-                    # Opcional: Mostrar los primeros 10 para que no se vea vacío
-                    st.caption("Ejemplos de tu lista:")
-                    st.dataframe(df.head(5)[['Nombre del Canal', '📂 Carpeta (Ubicación)']], hide_index=True)
+                
+                # Mostramos tabla de resultados (solo info)
+                st.caption(f"Se encontraron {len(resultados)} canales.")
+                st.dataframe(
+                    resultados[['Nombre del Canal', '📂 Carpeta (Ubicación)']],
+                    use_container_width=True,
+                    hide_index=True
+                )
                 
                 st.write("---")
-                if st.button("🔄 Recargar Lista"):
+                
+                # 2. REPRODUCTOR / PROBADOR
+                st.subheader("▶️ Probador de Señal")
+                
+                # Llenamos el selectbox con los resultados de la búsqueda de arriba
+                lista_nombres = resultados['Nombre del Canal'].tolist()
+                
+                if lista_nombres:
+                    seleccion = st.selectbox("📺 Selecciona un canal de la lista de arriba para probar:", lista_nombres)
+                    
+                    if seleccion:
+                        # Buscamos los datos del canal seleccionado
+                        row = df[df['Nombre del Canal'] == seleccion].iloc[0]
+                        link_ts = row['Link TS']
+                        link_m3u8 = row['Link M3U8']
+                        carpeta = row['📂 Carpeta (Ubicación)']
+                        
+                        st.success(f"Seleccionado: **{seleccion}** | Ubicación: **{carpeta}**")
+                        
+                        col_vid, col_info = st.columns([2, 1])
+                        
+                        with col_vid:
+                            st.write("**Reproductor Web (M3U8):**")
+                            # Intentamos reproducir usando el formato HLS (.m3u8) que es más compatible
+                            st.video(link_m3u8)
+                            st.caption("Nota: Si sale error o pantalla negra, es porque el navegador no soporta el formato de este canal específico.")
+                        
+                        with col_info:
+                            st.write("**Datos Técnicos:**")
+                            st.text_input("Enlace .TS (Para VLC):", link_ts)
+                            st.info("Si el reproductor web falla, copia el enlace de arriba y pégalo en VLC Player.")
+
+                else:
+                    st.warning("No hay canales para mostrar con ese filtro.")
+
+                st.write("---")
+                if st.button("🔄 Nueva Carga"):
                     del st.session_state['df_canales']
                     st.rerun()
